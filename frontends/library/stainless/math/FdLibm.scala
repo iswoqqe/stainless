@@ -40,21 +40,18 @@ object FdLibm {
 
   object Sin {
     def sin(x: Double): Double = {
-      val y = new Array[Double](2)
-      val z = 0.0d
-
       val ix = __HI(x) & EXP_SIGNIF_BITS
       if (ix <= 0x3fe9_21fb) // |x| ~< pi / 4
-        __kernel_sin(x, z, 0)
+        __kernel_sin(x, 0.0d, 0)
       else if (ix >= EXP_BITS) // sin(Inf or NaN) is NaN
         x - x
       else {
-        val n = RemPio2.__ieee754_rem_pio2(x, y)
+        val (n, (y0, y1)) = RemPio2.__ieee754_rem_pio2(x)
         n & 3 match {
-          case 0 => Sin.__kernel_sin(y(0), y(1), 1)
-          case 1 => Cos.__kernel_cos(y(0), y(1))
-          case 2 => -Sin.__kernel_sin(y(0), y(1), 1)
-          case _ => -Cos.__kernel_cos(y(0), y(1))
+          case 0 => Sin.__kernel_sin(y0, y1, 1)
+          case 1 => Cos.__kernel_cos(y0, y1)
+          case 2 => -Sin.__kernel_sin(y0, y1, 1)
+          case _ => -Cos.__kernel_cos(y0, y1)
         }
       }
     }
@@ -114,19 +111,6 @@ object FdLibm {
   }
 
   object RemPio2 {
-    private val two_over_pi = Array[Int](
-      0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62,
-      0x95993C, 0x439041, 0xFE5163, 0xABDEBB, 0xC561B7, 0x246E3A,
-      0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129,
-      0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41,
-      0x3991D6, 0x398353, 0x39F49C, 0x845F8B, 0xBDF928, 0x3B1FF8,
-      0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF,
-      0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5,
-      0xF17B3D, 0x0739F7, 0x8A5292, 0xEA6BFB, 0x5FB11F, 0x8D5D08,
-      0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3,
-      0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880,
-      0x4D7327, 0x310606, 0x1556CA, 0x73A8C9, 0x60E27B, 0xC08C6B)
-
     private val npio2_hw = Array[Int](
       0x3FF921FB, 0x400921FB, 0x4012D97C, 0x401921FB, 0x401F6A7A, 0x4022D97C,
       0x4025FDBB, 0x402921FB, 0x402C463A, 0x402F6A7A, 0x4031475C, 0x4032D97C,
@@ -143,127 +127,92 @@ object FdLibm {
     private val pio2_3  = 2.02226624871116645580e-21d // 0x1.3198a2ep-69
     private val pio2_3t = 8.47842766036889956997e-32d // 0x1.b839a252049c1p-104
 
-    def __ieee754_rem_pio2(x: Double, y: Array[Double]): Int = {
-      var z = 0.0d
-      var w = 0.0d
-      var t = 0.0d
-      var r = 0.0d
-      var fn = 0.0d
-      val tx = new Array[Double](3)
-      var e0 = 0
-      var i = 0
-      var j = 0
-      var nx = 0
-      var n = 0
-      var ix = 0
-      var hx = 0
-
-      hx = __HI(x)
-      ix = hx & EXP_SIGNIF_BITS
-      if (ix <= 0x3fe9_21fb) { // |x| ~<= pi/4 , no need for reduction
-        y(0) = x
-        y(1) = 0
-        return 0
-      }
-      if (ix < 0x4002_d97c) { // |x| < 3pi/4, special case with n=+-1
-        if (hx > 0) {
-          z = x - pio2_1
-          if (ix != 0x3ff9_21fb) { // 33+53 bit pi is good enough
-            y(0) = z - pio2_1t
-            y(1) = (z - y(0)) - pio2_1t
-          }
-          else { // near pi/2, use 33+33+53 bit pi
-            z = z - pio2_2
-            y(0) = z - pio2_2t
-            y(1) = (z - y(0)) - pio2_2t
-          }
-          return 1
-        }
-        else { // negative x
-          z = x + pio2_1
-          if (ix != 0x3ff_921fb) { // 33+53 bit pi is good enough
-            y(0) = z + pio2_1t
-            y(1) = (z - y(0)) + pio2_1t
-          }
-          else { // near pi/2, use 33+33+53 bit pi
-            z = z + pio2_2
-            y(0) = z + pio2_2t
-            y(1) = (z - y(0)) + pio2_2t
-          }
-          return -1
-        }
-      }
-      if (ix <= 0x4139_21fb) { // |x| ~<= 2^19*(pi/2), medium size
-        t = if x.isNegative then -x else x // Math.abs(x)
-        n = (t * invpio2 + 0.5).toInt
-        fn = n.toDouble
-        r = t - fn * pio2_1
-        w = fn * pio2_1t // 1st round good to 85 bit
-        if (n < 32 && ix != npio2_hw(n - 1))
-          y(0) = r - w // quick check no cancellation
-        else {
-          j = ix >> 20
-          y(0) = r - w
-          i = j - ((__HI(y(0)) >> 20) & 0x7ff)
-          if (i > 16) { // 2nd iteration needed, good to 118
-            t = r
-            w = fn * pio2_2
-            r = t - w
-            w = fn * pio2_2t - ((t - r) - w)
-            y(0) = r - w
-            i = j - ((__HI(y(0)) >> 20) & 0x7ff)
-            if (i > 49) { // 3rd iteration need, 151 bits acc
-              t = r // will cover all possible cases
-              w = fn * pio2_3
-              r = t - w
-              w = fn * pio2_3t - ((t - r) - w)
-              y(0) = r - w
-            }
-          }
-        }
-        y(1) = (r - y(0)) - w
-        if (hx < 0) {
-          y(0) = -y(0)
-          y(1) = -y(1)
-          return -n
-        }
-        else
-          return n
-      }
-      // all other (large) arguments
+    def __ieee754_rem_pio2(x: Double): (Int, (Double, Double)) = {
+      val hx = __HI(x)
+      val ix = hx & EXP_SIGNIF_BITS
       if (ix >= EXP_BITS) { // x is inf or NaN
-        y(0) = x - x
-        y(1) = x - x
-        return 0
+        (0, (x - x, x - x))
       }
-      // set z = scalbn(|x|, ilogb(x)-23)
-      z = __LO(0.0d, __LO(x))
-      e0 = (ix >> 20) - 1046 // e0 = ilogb(z) - 23;
-      z = __HI(z, ix - (e0 << 20))
-      i = 0
-      while (i < 2) {
-        tx(i) = z.toInt.toDouble
-        z = (z - tx(i)) * TWO24
-        i += 1
+      else if (ix <= 0x3fe9_21fb) { // |x| ~<= pi/4 , no need for reduction
+        (0, (x, 0))
       }
-      tx(2) = z
-      nx = 3
-      while (tx(nx - 1) == 0.0) { // skip zero term
-        nx -= 1
+      else if (ix < 0x4002_d97c) { // |x| < 3pi/4, special case with n=+-1
+        if (hx > 0) { // positive x
+          if (ix != 0x3ff9_21fb) { // 33+53 bit pi is good enough
+            val z = x - pio2_1
+            (1, (z - pio2_1t, (z - (z - pio2_1t)) - pio2_1t))
+          } else { // near pi/2, use 33+33+53 bit pi
+            val z = (x - pio2_1) - pio2_2
+            (1, (z - pio2_2t, (z - (z - pio2_1t)) - pio2_2t))
+          }
+        } else { // negative x
+          if (ix != 0x3ff_921fb) { // 33+53 bit pi is good enough
+            val z = x + pio2_1
+            (-1, (z + pio2_1t, (z - (z + pio2_1t)) + pio2_1t))
+          } else { // near pi/2, use 33+33+53 bit pi
+            val z = (x + pio2_1) + pio2_2
+            (-1, (z + pio2_2t, (z - (z + pio2_1t)) + pio2_2t))
+          }
+        }
       }
-      n = KernelRemPio2.__kernel_rem_pio2(tx, y, e0, nx, 2, two_over_pi)
-      if (hx < 0) {
-        y(0) = -y(0)
-        y(1) = -y(1)
-        -n
+      else if (ix <= 0x4139_21fb) { // |x| ~<= 2^19*(pi/2), medium size
+        val j = ix >> 20
+        val abs_x = if x.isNegative then -x else x // Math.abs(x)
+        val n = (abs_x * invpio2 + 0.5).toInt
+        val fn = n.toDouble
+        val r0 = abs_x - fn * pio2_1 // 1st round good to 85 bit
+        val w0 = fn * pio2_1t
+        val y0 = r0 - w0
+        val (yy0, yy1) = if (n < 32 && ix != npio2_hw(n - 1) || ((__HI(y0) >> 20) & 0x7ff) <= 16) {
+          (y0, (r0 - y0) - w0)
+        } else { // 2nd iteration needed, good to 118
+          val r1 = r0 - fn * pio2_2
+          val w1 = fn * pio2_2t - ((r0 - r1) - fn * pio2_2)
+          val y1 = r1 - w1
+          if (j - ((__HI(y1) >> 20) & 0x7ff) <= 49) {
+            (y1, (r1 - y1) - w1)
+          } else { // 3rd iteration need, 151 bits acc, will cover all possible cases
+            val r2 = r1 - fn * pio2_3
+            val w2 = fn * pio2_3t - ((r1 - r2) - fn * pio2_3)
+            val y2 = r2 - w2
+            (y2, (r2 - y2) - w2)
+          }
+        }
+        if hx < 0 then (-n, (-yy0, -yy1)) else (n, (yy0, yy1))
       }
-      else
-        n
+      else { // all other (large) arguments
+        // set z = scalbn(|x|, ilogb(x)-23)
+        val z0 = __LO(0.0d, __LO(x))
+        val e0 = (ix >> 20) - 1046 // e0 = ilogb(z) - 23;
+        val z1 = __HI(z0, ix - (e0 << 20))
+        val tx0 = z1.toInt.toDouble
+        val z2 = (z1 - tx0) * TWO24
+        val tx1 = z2.toInt.toDouble
+        val z3 = (z2 - tx1) * TWO24
+        val tx2 = z3
+        val nx = if tx2 == 0.0 then if tx1 == 0.0 then if tx0 == 0.0 then 0 else 1 else 2 else 3
+        val (n1, (y0, y1)) = KernelRemPio2.__kernel_rem_pio2_prec_2((tx0, tx1, tx2), e0, nx)
+        if hx < 0 then (-n1, (-y0, -y1)) else (n1, (y0, y1))
+      }
     }
   }
 
+  @extern
   object KernelRemPio2 {
-    private val init_jk = Array[Int](2, 3, 4, 6)
+//    private val init_jk = Array[Int](2, 3, 4, 6)
+
+    private val two_over_pi = Array[Int]( // moved to this object from RemPio2
+      0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62,
+      0x95993C, 0x439041, 0xFE5163, 0xABDEBB, 0xC561B7, 0x246E3A,
+      0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129,
+      0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41,
+      0x3991D6, 0x398353, 0x39F49C, 0x845F8B, 0xBDF928, 0x3B1FF8,
+      0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF,
+      0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5,
+      0xF17B3D, 0x0739F7, 0x8A5292, 0xEA6BFB, 0x5FB11F, 0x8D5D08,
+      0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3,
+      0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880,
+      0x4D7327, 0x310606, 0x1556CA, 0x73A8C9, 0x60E27B, 0xC08C6B)
 
     private val PIo2 = Array[Double](
       1.57079625129699707031e+00d, // 0x1.921fb4p0,
@@ -277,12 +226,8 @@ object FdLibm {
 
     private val twon24 = 5.96046447753906250000e-08d // 0x1.0p-24
 
-    def __kernel_rem_pio2(x: Array[Double], y: Array[Double], e0: Int, nx: Int, prec: Int, ipio2: Array[Int]): Int = {
+    def __kernel_rem_pio2_prec_2(x: (Double, Double, Double), e0: Int, nx: Int): (Int, (Double, Double)) = {
       var jz = 0
-      var jx = 0
-      var jv = 0
-      var jp = 0
-      var jk = 0
       var carry = 0
       var n = 0
       var i = 0
@@ -299,35 +244,40 @@ object FdLibm {
       val q = new Array[Double](20)
 
       // initialize jk
-      jk = init_jk(prec)
-      jp = jk
+      val jk = 4 // init_jk(prec)
+      val jp = jk
 
       // determine jx, jv, q0, note that 3 > q0
-      jx = nx - 1
-      jv = (e0 - 3) / 24
-      if (jv < 0)
-        jv = 0
+      val jx = nx - 1
+      val jv = {
+        val tmp = (e0 - 3) / 24
+        if tmp < 0 then 0 else tmp
+      }
       q0 = e0 - 24*(jv + 1);
 
       // set up f[0] to f[jx+jk] where f[jx+jk] = ipio2[jv+jk]
       j = jv - jx
       m = jx + jk
       i = 0
-      while (i <= m) {
+      while (i <= m) { // max iterations: 7
         f(i) = if (j < 0) 0.0
-        else ipio2(j).toDouble
+        else two_over_pi(j).toDouble
         i += 1
         j += 1
       }
 
       // compute q[0],q[1],...q[jk]
       i = 0
-      while (i <= jk) {
-        j = 0
+      while (i <= jk) { // max iterations: 4
         fw = 0.0
-        while (j <= jx) {
-          fw += x(j) * f(jx + i - j)
-          j += 1
+        if (0 <= jx) {
+          fw += x._1 * f(jx + i)
+          if (1 <= jx) {
+            fw += x._2 * f(jx + i - 1)
+            if (2 <= jx) {
+              fw += x._3 * f(jx + i - 2)
+            }
+          }
         }
         q(i) = fw
         i += 1
@@ -338,12 +288,12 @@ object FdLibm {
       n = 0
       ih = 0
       var loop = true
-      while (loop) {
+      while (loop) { // max iterations: ????
         // distill q[] into iq[] reversingly
         i = 0
         j = jz
         z = q(jz)
-        while (j > 0) {
+        while (j > 0) { // max iterations: 4
           fw = (twon24 * z).toInt.toDouble
           iq(i) = (z - TWO24 * fw).toInt
           z = q(j - 1) + fw
@@ -372,7 +322,7 @@ object FdLibm {
           n += 1
           carry = 0
           i = 0
-          while (i < jz) { // compute 1-q
+          while (i < jz) { // compute 1-q // max iterations: 4
             j = iq(i)
             if (carry == 0)
               if (j != 0) {
@@ -407,17 +357,22 @@ object FdLibm {
           }
           if (j == 0) { // need recomputation
             k = 1
-            while (iq(jk - k) == 0) { // k = no. of terms needed
+            while (iq(jk - k) == 0) { // k = no. of terms needed // max iterations: 4????
               k += 1
             }
             i = jz + 1
             while (i <= jz + k) { // add q[jz+1] to q[jz+k]
-              f(jx + i) = ipio2(jv + i).toDouble
+              f(jx + i) = two_over_pi(jv + i).toDouble
               j = 0
               fw = 0.0
-              while (j <= jx) {
-                fw += x(j) * f(jx + i - j)
-                j += 1
+              if (0 <= jx) {
+                fw += x._1 * f(jx + i)
+                if (1 <= jx) {
+                  fw += x._2 * f(jx + i - 1)
+                  if (2 <= jx) {
+                    fw += x._3 * f(jx + i - 2)
+                  }
+                }
               }
               q(i) = fw
               i += 1
@@ -435,7 +390,7 @@ object FdLibm {
       if (z == 0.0) {
         jz -= 1
         q0 -= 24
-        while (iq(jz) == 0) {
+        while (iq(jz) == 0) { // max iterations: 4?
           jz -= 1
           q0 -= 24
         }
@@ -456,7 +411,7 @@ object FdLibm {
       // convert integer "bit" chunk to floating-point value
       fw = Math.scalb(1.0, q0)
       i = jz
-      while (i >= 0) {
+      while (i >= 0) { // max iterations: 4?
         q(i) = fw * iq(i).toDouble
         fw *= twon24
         i -= 1
@@ -464,7 +419,7 @@ object FdLibm {
 
       // compute PIo2[0,...,jp]*q[jz,...,0]
       i = jz
-      while (i >= 0) {
+      while (i >= 0) { // max iterations: 4?
         fw = 0.0
         k = 0
         while (k <= jp && k <= jz - i) {
@@ -475,69 +430,30 @@ object FdLibm {
         i -= 1
       }
 
-      prec match {
-        case 0 =>
-          fw = 0.0
-          i = jz
-          while (i >= 0) {
-            fw += fq(i)
-            i -= 1
-          }
-          y(0) = if (ih == 0) fw else -fw
-        case 1 | 2 =>
-          fw = 0.0
-          i = jz
-          while (i >= 0) {
-            fw += fq(i)
-            i -= 1
-          }
-          y(0) = if (ih == 0) fw else -fw
-          fw = fq(0) - fw
-          i = 1
-          while (i <= jz) {
-            fw += fq(i)
-            i += 1
-          }
-          y(1) = if (ih == 0) fw else -fw
-        case 3 => // painful
-          i = jz
-          fw = 0.0d
-          while (i > 0) {
-            fw = fq(i - 1) + fq(i)
-            fq(i) += fq(i - 1) - fw
-            fq(i - 1) = fw
-            i -= 1
-          }
-          i = jz
-          while (i > 1) {
-            fw = fq(i - 1) + fq(i)
-            fq(i) += fq(i - 1) - fw
-            fq(i - 1) = fw
-            i -= 1
-          }
-          fw = 0.0
-          i = jz
-          while (i >= 2) {
-            fw += fq(i)
-            i -= 1
-          }
-          if (ih == 0) {
-            y(0) = fq(0)
-            y(1) = fq(1)
-            y(2) = fw
-          }
-          else {
-            y(0) = -fq(0)
-            y(1) = -fq(1)
-            y(2) = -fw
-          }
+      val y1 =  {
+        fw = 0.0
+        i = jz
+        while (i >= 0) { // max iterations: 4?
+          fw += fq(i)
+          i -= 1
+        }
+        val y10 = if (ih == 0) fw else -fw
+        fw = fq(0) - fw
+        i = 1
+        while (i <= jz) { // max iterations: 4?
+          fw += fq(i)
+          i += 1
+        }
+        val y11 = if (ih == 0) fw else -fw
+        (y10, y11)
       }
-      n & 7
+      (n & 7, y1)
     }
   }
 
   @ignore
   def main(argv: Array[String]): Unit = {
+    Sin.sin(9.061448382195477E-155)
     var i = Int.MinValue
     while (i != Int.MaxValue) {
       val d = java.lang.Float.intBitsToFloat(i).toDouble
