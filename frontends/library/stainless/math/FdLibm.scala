@@ -3,48 +3,43 @@ package math
 
 import stainless.annotation.*
 import stainless.lang.*
+import stainless.math.wrapping
 
 object FdLibm {
   private val TWO24 = 1.67772160000000000000e+07 // 0x1.0p24
   private val EXP_SIGNIF_BITS = 0x7fff_ffff
   private val EXP_BITS = 0x7ff0_0000
 
-  @extern
   private def __LO(x: Double): Int = {
-    val transducer = java.lang.Double.doubleToRawLongBits(x)
-    transducer.toInt
+    val transducer = java.lang.Double.doubleToLongBits(x)
+    wrapping(transducer.toInt)
   }
 
-  @extern
   private def __LO(x: Double, low: Int): Double = {
-    val transX = java.lang.Double.doubleToRawLongBits(x)
+    val transX = java.lang.Double.doubleToLongBits(x)
     java.lang.Double.longBitsToDouble((transX & 0xFFFF_FFFF_0000_0000L) | (low & 0x0000_0000_FFFF_FFFFL))
   }
 
-  @extern
   private def __HI(x: Double): Int = {
-    val transducer = java.lang.Double.doubleToRawLongBits(x)
+    val transducer = java.lang.Double.doubleToLongBits(x)
     (transducer >> 32).toInt
   }
 
-  @extern
   private def __HI(x: Double, high: Int): Double = {
-    val transX = java.lang.Double.doubleToRawLongBits(x)
+    val transX = java.lang.Double.doubleToLongBits(x)
     java.lang.Double.longBitsToDouble((transX & 0x0000_0000_FFFF_FFFFL) | high.toLong << 32)
   }
 
-  @extern
   private def __HI_LO(high: Int, low: Int): Double = {
     java.lang.Double.longBitsToDouble((high.toLong << 32) | (low & 0xffff_ffffL))
   }
 
-  @extern @pure
-  def assume(P: Boolean): Unit = {}.ensuring(P)
-
   object Sin {
+    @opaque
     def sin(x: Double): Double = {
       val ix = __HI(x) & EXP_SIGNIF_BITS
       if (ix <= 0x3fe9_21fb) // |x| ~< pi / 4
+        unfold(__kernel_sin(x, 0.0d, 0))
         __kernel_sin(x, 0.0d, 0)
       else if (ix >= EXP_BITS) // sin(Inf or NaN) is NaN
         x - x
@@ -57,7 +52,12 @@ object FdLibm {
           case _ => -Cos.__kernel_cos(y0, y1)
         }
       }
-    }
+    }.ensuring(res =>
+      (!x.isFinite == res.isNaN)
+        && (x.equiv(+0.0d) ==> res.equiv(+0.0d))
+        && (x.equiv(-0.0d) ==> res.equiv(-0.0d))
+        && (-1.0d <= res && res <= 1.0d || res.isNaN)
+    )
 
     private val S1 = -1.66666666666666324348e-01d // -0x1.5555555555549p-3
     private val S2 = 8.33333333332248946124e-03d // 0x1.111111110f8a6p-7
@@ -66,14 +66,12 @@ object FdLibm {
     private val S5 = -2.50507602534068634195e-08d // -0x1.ae5e68a2b9cebp-26
     private val S6 = 1.58969099521155010221e-10d // 0x1.5d93a5acfd57cp-33
 
+    @opaque
     def __kernel_sin(x: Double, y: Double, iy: Int): Double = {
-      require(-0.7853981633974483 <= x && x <= 0.7853981633974483)
-      require(-0.7853981633974483 <= x + y && x + y <= 0.7853981633974483)
-//      require(-0.785398483276367076478d <= x && x <= 0.785398483276367076478d)
-//      require(-1.3137570234753214E-7d / 32 <= y && y <= 1.3137570234753214E-7d / 32)
+      require(-0.7854 <= x && x <= 0.7854)
+      require(-1.1102230246251565E-16 <= y && y <= 1.1102230246251565E-16)
       val ix = __HI(x) & EXP_SIGNIF_BITS
       if (ix < 0x3e40_0000) { // abs(x) < 7.450580596923828125e-9
-        assume((if x < 0 then -x else x) < 7.450580596923828125e-9) // TODO
         if (x.toInt == 0)
           return x
       }
@@ -91,6 +89,27 @@ object FdLibm {
   }
 
   object Cos {
+    @opaque
+    def cos(x: Double): Double = {
+      val ix = __HI(x) & EXP_SIGNIF_BITS
+      if (ix <= 0x3fe9_21fb) // |x| ~< pi / 4
+        __kernel_cos(x, 0.0d)
+      else if (ix >= EXP_BITS) // sin(Inf or NaN) is NaN
+        x - x
+      else {
+        val (n, y0, y1) = RemPio2.__ieee754_rem_pio2(x)
+        n & 3 match {
+          case 0 => Cos.__kernel_cos(y0, y1)
+          case 1 => -Sin.__kernel_sin(y0, y1, 1)
+          case 2 => -Cos.__kernel_cos(y0, y1)
+          case _ => Sin.__kernel_sin(y0, y1, 1)
+        }
+      }
+    }.ensuring(res =>
+      (!x.isFinite == res.isNaN)
+        && (-1.0d <= res && res <= 1.0d || res.isNaN)
+    )
+
     private val C1 =  4.16666666666666019037e-02d //  0x1.555555555554cp-5
     private val C2 = -1.38888888888741095749e-03d // -0x1.6c16c16c15177p-10
     private val C3 =  2.48015872894767294178e-05d //  0x1.a01a019cb159p-16
@@ -98,41 +117,29 @@ object FdLibm {
     private val C5 =  2.08757232129817482790e-09d //  0x1.1ee9ebdb4b1c4p-29
     private val C6 = -1.13596475577881948265e-11d // -0x1.8fae9be8838d4p-37
 
+    @opaque
     def __kernel_cos(x: Double, y: Double): Double = {
-      require(-0.7853981633974483 <= x && x <= 0.7853981633974483)
-      require(-0.7853981633974483 <= x + y && x + y <= 0.7853981633974483)
-//      require(-0.785398483276367076478d <= x && x <= 0.785398483276367076478d)
-//      require(-0.785398483276367076478d <= x + y && x + y <= 0.785398483276367076478d)
-//      require(-1.3137570234753214E-7d / 32 <= y && y <= 1.3137570234753214E-7d / 32)
-//      require(-6.07710050630291E-11 <= y && y <= 6.07710050630291E-11)
-      require(-5E-9 <= y && y <= 5E-9)
+      require(-0.7854 <= x && x <= 0.7854)
+      require(-1.1102230246251565E-16 <= y && y <= 1.1102230246251565E-16)
       val ix = __HI(x) & EXP_SIGNIF_BITS
       if (ix < 0x3e40_0000) { // abs(x) < 7.450580596923828125e-9
-        assume((if x < 0 then -x else x) < 7.450580596923828125e-9) // TODO
         if (x.toInt == 0)
           return 1.0d
       }
 
-      assume((if x < 0 then -x else x) >= 7.450580596923828125e-9) // TODO
       val z = x*x
       val r = z*(C1 + z*(C2 + z*(C3 + z*(C4 + z*(C5 + z*C6)))))
       assert(0 <= r && r <= 0.785398483276367076478d*0.785398483276367076478d*C1)
+
       if (ix < 0x3FD3_3333) // |x| < 0.3
-        assume((if x < 0 then -x else x) < 0.299999952316284179688) // TODO
-        assert(-1.0d <= 1.0 - (0.5*z - (z*r - x*y)) && 1.0 - (0.5*z - (z*r - x*y)) <= 1.0d)
         1.0 - (0.5*z - (z*r - x*y))
       else {
-        assume((if x < 0 then -x else x) >= 0.299999952316284179688) // TODO
         val qx = if (ix > 0x3fe9_0000) // x > 0.78125
           0.28125d
         else
           __HI_LO(ix - 0x0020_0000, 0)
-        assume((qx == 0.28125d) == ((if x < 0 then -x else x) > 0.781250476837158092103)) // TODO
-        assume((qx == 0.28125d) || (4 * qx <= (if x < 0 then -x else x) && 5 * qx > (if x < 0 then -x else x))) // TODO
         val hz = 0.5d*z - qx
         val a  = 1.0d - qx
-        assert(z > 0.6103523075582868 || (-1.0d <= a - (hz - (z*r - x*y)) && a - (hz - (z*r - x*y)) <= 1.0d))
-        assert(z <= 0.6103523075582868 || (-1.0d <= a - (hz - (z*r - x*y)) && a - (hz - (z*r - x*y)) <= 1.0d))
         a - (hz - (z*r - x*y))
       }
     }.ensuring(res => -1.0d <= res && res <= 1.0d) // very loose bounds
@@ -155,27 +162,27 @@ object FdLibm {
     private val pio2_3  = 2.02226624871116645580e-21d // 0x1.3198a2ep-69
     private val pio2_3t = 8.47842766036889956997e-32d // 0x1.b839a252049c1p-104
 
+    @opaque
     def __ieee754_rem_pio2(x: Double): (Int, Double, Double) = {
       val hx = __HI(x)
-      assume((hx >= 0) == (x >= 0)) // TODO
       val ix = hx & EXP_SIGNIF_BITS
       if (ix >= EXP_BITS) { // x is inf or NaN
-        assume(!x.isFinite)
+        assert(!x.isFinite)
         (0, x - x, x - x)
       }
       else if (ix <= 0x3fe9_21fb) { // |x| ~<= pi/4 , no need for reduction
-        assume(-0.785398483276367076478d <= x && x <= 0.785398483276367076478d) // TODO
+        assert(-0.785398483276367076478d <= x && x <= 0.785398483276367076478d)
         (0, x, 0d)
       }
       else if (ix < 0x4002_d97c) { // |x| < 3pi/4, special case with n=+-1
-        assume(-2.35619354248046875d < x && x < -0.785398483276367076478d || 0.785398483276367076478d < x && x < 2.35619354248046875d) // TODO
+        assert(-2.35619354248046875d < x && x < -0.785398483276367076478d || 0.785398483276367076478d < x && x < 2.35619354248046875d)
         if (hx > 0) { // positive x
           if (ix != 0x3ff9_21fb) { // 33+53 bit pi is good enough
             val z = x - pio2_1
             (1, z - pio2_1t, (z - (z - pio2_1t)) - pio2_1t)
           } else { // near pi/2, use 33+33+53 bit pi
             val z = (x - pio2_1) - pio2_2
-            (1, z - pio2_2t, (z - (z - pio2_1t)) - pio2_2t)
+            (1, z - pio2_2t, (z - (z - pio2_2t)) - pio2_2t)
           }
         } else { // negative x
           if (ix != 0x3ff_921fb) { // 33+53 bit pi is good enough
@@ -183,66 +190,72 @@ object FdLibm {
             (-1, z + pio2_1t, (z - (z + pio2_1t)) + pio2_1t)
           } else { // near pi/2, use 33+33+53 bit pi
             val z = (x + pio2_1) + pio2_2
-            (-1, z + pio2_2t, (z - (z + pio2_1t)) + pio2_2t)
+            (-1, z + pio2_2t, (z - (z + pio2_2t)) + pio2_2t)
           }
         }
       }
-      else if (ix <= 0x4139_21fb) { // |x| ~<= 2^19*(pi/2), medium size // TODO: should this not say 2^20??
-        assume(-1647099.99999999976717d <= x && x <= -2.35619354248046875d || 2.35619354248046875d <= x && x <= 1647099.99999999976717d) // TODO
-        val j = ix >> 20
-        val abs_x = if x.isNegative then -x else x // Math.abs(x)
-        assert(2.35619354248046875d <= abs_x && abs_x <= 1647099.99999999976717d)
-        val n = (abs_x * invpio2 + 0.5).toInt
-        val fn = n.toDouble
-        assert(1 <= n && n <= 1048576)
-        val r0 = abs_x - fn * pio2_1 // 1st round good to 85 bit
-        assert(-0.7854618860874325 <= r0 && r0 <= 0.7854618860874325)
-        val w0 = fn * pio2_1t
-        val y0 = r0 - w0
-        val (yy0, yy1) = if (n < 32 && ix != npio2_hw(n - 1) || j - ((__HI(y0) >> 20) & 0x7ff) <= 16) {
-          (y0, (r0 - y0) - w0)
-        } else { // 2nd iteration needed, good to 118
-          assume(16 * (if y0 < 0 then -y0 else y0) < (if x < 0 then -x else x)) // TODO
-          val r1 = r0 - fn * pio2_2
-          val w1 = fn * pio2_2t - ((r0 - r1) - fn * pio2_2)
-          val y1 = r1 - w1
-          if (j - ((__HI(y1) >> 20) & 0x7ff) <= 49) {
-            (y1, (r1 - y1) - w1)
-          } else { // 3rd iteration need, 151 bits acc, will cover all possible cases
-            assume(49 * (if y0 < 0 then -y0 else y0) < (if x < 0 then -x else x)) // TODO
-            val r2 = r1 - fn * pio2_3
-            val w2 = fn * pio2_3t - ((r1 - r2) - fn * pio2_3)
-            val y2 = r2 - w2
-            (y2, (r2 - y2) - w2)
-          }
-        }
-        if hx < 0 then (-n, -yy0, -yy1) else (n, yy0, yy1)
-      }
+      // We skip this case for now since it is currently too challenging for SMT-solvers.
+      // It would likely take several days for a proof, unless we find some "smart" solution.
+//      else if (ix <= 0x4139_21fb) { // |x| ~<= 2^19*(pi/2), medium size // TODO: should this not say 2^20??
+//        assume(-1647099.99999999976717d <= x && x <= -2.35619354248046875d || 2.35619354248046875d <= x && x <= 1647099.99999999976717d) // TODO
+//        val j = ix >> 20
+//        val abs_x = if x.isNegative then -x else x // Math.abs(x)
+//        assert(2.35619354248046875d <= abs_x && abs_x <= 1647099.99999999976717d)
+//        val n = (abs_x * invpio2 + 0.5).toInt
+//        val fn = n.toDouble
+//        assert(1 <= n && n <= 1048576)
+//        val r0 = abs_x - fn * pio2_1 // 1st round good to 85 bit
+//        assert(-0.7854618860874325 <= r0 && r0 <= 0.7854618860874325)
+//        val w0 = fn * pio2_1t
+//        val y0 = r0 - w0
+//        val (yy0, yy1) = if (n < 32 && ix != npio2_hw(n - 1) || j - ((__HI(y0) >> 20) & 0x7ff) <= 16) {
+//          (y0, (r0 - y0) - w0)
+//        } else { // 2nd iteration needed, good to 118
+//          assume(16 * (if y0 < 0 then -y0 else y0) < (if x < 0 then -x else x)) // TODO
+//          val r1 = r0 - fn * pio2_2
+//          val w1 = fn * pio2_2t - ((r0 - r1) - fn * pio2_2)
+//          val y1 = r1 - w1
+//          if (j - ((__HI(y1) >> 20) & 0x7ff) <= 49) {
+//            (y1, (r1 - y1) - w1)
+//          } else { // 3rd iteration need, 151 bits acc, will cover all possible cases
+//            assume(49 * (if y0 < 0 then -y0 else y0) < (if x < 0 then -x else x)) // TODO
+//            val r2 = r1 - fn * pio2_3
+//            val w2 = fn * pio2_3t - ((r1 - r2) - fn * pio2_3)
+//            val y2 = r2 - w2
+//            (y2, (r2 - y2) - w2)
+//          }
+//        }
+//        if hx < 0 then (-n, -yy0, -yy1) else (n, yy0, yy1)
+//      }
       else { // all other (large) arguments
-        assume(x < -1647099.99999999976717d || 1647099.99999999976717d < x) // TODO
-        assume(x.isFinite) // TODO
-        // set z = scalbn(|x|, ilogb(x)-23)
-//        val z0 = __LO(0.0d, __LO(x))
-//        val e0 = (ix >> 20) - 1046 // e0 = ilogb(z) - 23;
-//        val z1 = __HI(z0, ix - (e0 << 20))
-//        val tx0 = z1.toInt.toDouble
-//        val z2 = (z1 - tx0) * TWO24
-//        val tx1 = z2.toInt.toDouble
-//        val z3 = (z2 - tx1) * TWO24
-//        val tx2 = z3
-//        val nx = if tx2 == 0.0 then if tx1 == 0.0 then if tx0 == 0.0 then 0 else 1 else 2 else 3
-//        val (n1, (y0, y1)) = KernelRemPio2.__kernel_rem_pio2_prec_2_simplified((tx0, tx1, tx2), e0)
+        assert(x <= -2.35619354248046875d || 2.35619354248046875d <= x)
         val abs = if hx < 0 then -x else x
-        val (n1, y0, y1) = KernelRemPio2.__kernel_rem_pio2_final_attempt(abs)
+        val (n1, y0, y1) = KernelRemPio2.__kernel_rem_pio2(abs)
         if hx < 0 then (-n1, -y0, -y1) else (n1, y0, y1)
       }
-    }//.ensuring(res =>
-//      (!res._2.isFinite || -1.0d <= res._2 && res._2 <= 1.0d) // TODO: find better bounds
-//    )
+    }.ensuring(res =>
+      (!x.isFinite) ||
+        (-8 < res._1 && res._1 < 8
+          && -0.785398483276367076478d <= res._2 && res._2 <= 0.785398483276367076478d
+          && -1.1102230246251565E-16 <= res._3 && res._3 <= 1.1102230246251565E-16)
+    )
   }
   
   object KernelRemPio2 {
-//    private val init_jk = Array[Int](2, 3, 4, 6)
+    // This object is based on the OpenJDK class `KernelRemPio2`, with modifications to simplify Stainless proofs.
+    // Some of the main changes:
+    // - the signature of `__kernel_rem_pio2()` has been changed
+    //   - it now accepts doubles as inputs, not arrays of 24-bit chunks of numbers (here, we only care about doubles anyway)
+    //   - the result is now computed with constant precision, not an argument-dependant precision
+    // - the body of `__kernel_rem_pio2()` has been split into several methods to clarify the structure of the algorithm
+    // - the input splitting may pad the input with leading zeros to ensure that the exponent of `q(0)` is always zero
+    // - the product of the input and two over pi is now evaluated using a constant precision, not an adaptive precision like in the original
+    //   - but, adaptive precision can probably be added again as a performance optimization
+    // - the compression of the result into a double-double is implemented in a different way to allow for a simple loop invariant
+    // - some loops are partially unrolled to help the SMT-solvers
+    // - new functions and constants for proof annotations have been added
+
+    //// Constants ////
 
     private val two_over_pi = Array[Int]( // moved to this object from RemPio2
       0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62,
@@ -269,22 +282,560 @@ object FdLibm {
 
     private val twon24 = 5.96046447753906250000e-08d // 0x1.0p-24
 
+    private val twon24Pow = Array[Double](
+      1,
+      5.9604644775390625E-8,
+      3.552713678800501E-15,
+      2.1175823681357508E-22,
+      1.2621774483536189E-29,
+      7.52316384526264E-37,
+      4.4841550858394146E-44,
+      2.6727647100921956E-51,
+      1.5930919111324523E-58,
+      9.495567745759799E-66,
+      5.659799424266695E-73,
+      3.3735033418337674E-80,
+      2.0107646833859488E-87,
+      1.1985091468012028E-94,
+      7.143671195514219E-102,
+      4.2579598400081507E-109,
+      2.5379418373156492E-116,
+      1.512731216738015E-123,
+      9.016580681431383E-131,
+      5.374300886053671E-138
+    )
+
+    //// Helpers for expressing invariants ////
+
     @pure
-    private def all20(a: Array[Double], P: Double => Boolean): Boolean = {
-      P(a(0)) && P(a(1)) && P(a(2)) && P(a(3)) && P(a(4)) && P(a(5)) && P(a(6)) && P(a(7)) && P(a(8)) && P(a(9)) && P(a(10)) && P(a(11)) && P(a(12)) && P(a(13)) && P(a(14)) && P(a(15)) && P(a(16)) && P(a(17)) && P(a(18)) && P(a(19))
+    private def all5(a: Array[Double], P: Double => Boolean): Boolean = {
+      require(a.length == 5)
+      P(a(0)) && P(a(1)) && P(a(2)) && P(a(3)) && P(a(4))
     }
 
     @pure
-    private def all20(a: Array[Double], P: (Double, Int) => Boolean): Boolean = {
-      P(a(0), 0) && P(a(1), 1) && P(a(2), 2) && P(a(3), 3) && P(a(4), 4) && P(a(5), 5) && P(a(6), 6) && P(a(7), 7) && P(a(8), 8) && P(a(9), 9) && P(a(10), 10) && P(a(11), 11) && P(a(12), 12) && P(a(13), 13) && P(a(14), 14) && P(a(15), 15) && P(a(16), 16) && P(a(17), 17) && P(a(18), 18) && P(a(19), 19)
+    private def all20(a: Array[Double], P: Double => Boolean): Boolean = {
+      require(a.length == 20)
+      P(a(0)) && P(a(1)) && P(a(2)) && P(a(3)) && P(a(4)) && P(a(5)) && P(a(6)) && P(a(7)) && P(a(8)) && P(a(9)) && P(a(10)) && P(a(11)) && P(a(12)) && P(a(13)) && P(a(14)) && P(a(15)) && P(a(16)) && P(a(17)) && P(a(18)) && P(a(19))
     }
 
     @pure
     private def all20Int(a: Array[Int], P: Int => Boolean): Boolean = {
+      require(a.length == 20)
       P(a(0)) && P(a(1)) && P(a(2)) && P(a(3)) && P(a(4)) && P(a(5)) && P(a(6)) && P(a(7)) && P(a(8)) && P(a(9)) && P(a(10)) && P(a(11)) && P(a(12)) && P(a(13)) && P(a(14)) && P(a(15)) && P(a(16)) && P(a(17)) && P(a(18)) && P(a(19))
     }
 
+    private def P(x: Double): Boolean = 0 <= x && x <= 5 * 0xffff_ffff_ffffL
+
+    private def Q(x: Double): Boolean = 0 <= x && x <= 0xff_ffff
+
+    private def QInt(x: Int): Boolean = 0 <= x && x <= 0xff_ffff
+
+    //// Invariants and bound arrays ////
+
     @pure
+    private def xxInv(xx: Array[Double]): Boolean = xx.length == 5 && all5(xx, Q)
+
+    @pure
+    private def fInv(f: Array[Double]): Boolean = f.length == 20 && all20(f, Q)
+
+    @pure
+    private def qInv(q: Array[Double]): Boolean = q.length == 20 && all20(q, P)
+
+    @pure
+    private def iqInv(iq: Array[Int]): Boolean = iq.length == 20 && all20Int(iq, QInt)
+
+    private val qqBound = Array[Double](
+      0.4999999403953552,
+      5.9604641222676946E-8,
+      3.552713467042264E-15,
+      2.117582241918006E-22,
+      1.2621773731219804E-29,
+      7.5231633968471315E-37,
+      4.4841548185629436E-44,
+      2.6727645507830045E-51,
+      1.5930918161767748E-58,
+      9.495567179779856E-66,
+      5.659799086916361E-73,
+      3.373503140757299E-80,
+      2.0107645635350341E-87,
+      1.1985090753644908E-94,
+      7.143670769718235E-102,
+      4.257959586213967E-109,
+      2.5379416860425275E-116,
+      1.5127311265722081E-123,
+      9.016580144001294E-131,
+      5.374300565720376E-138,
+    )
+
+    @pure
+    private def qqInv(qq: Array[Double]): Boolean = {
+      qq.length == 20
+        && 0 <= qq(0) && qq(0) <= 0.4999999403953552 // replacing this by `qqBound(0)` etc. seems to have a negative impact on solver performance
+        && 0 <= qq(1) && qq(1) <= 5.9604641222676946E-8
+        && 0 <= qq(2) && qq(2) <= 3.552713467042264E-15
+        && 0 <= qq(3) && qq(3) <= 2.117582241918006E-22
+        && 0 <= qq(4) && qq(4) <= 1.2621773731219804E-29
+        && 0 <= qq(5) && qq(5) <= 7.5231633968471315E-37
+        && 0 <= qq(6) && qq(6) <= 4.4841548185629436E-44
+        && 0 <= qq(7) && qq(7) <= 2.6727645507830045E-51
+        && 0 <= qq(8) && qq(8) <= 1.5930918161767748E-58
+        && 0 <= qq(9) && qq(9) <= 9.495567179779856E-66
+        && 0 <= qq(10) && qq(10) <= 5.659799086916361E-73
+        && 0 <= qq(11) && qq(11) <= 3.373503140757299E-80
+        && 0 <= qq(12) && qq(12) <= 2.0107645635350341E-87
+        && 0 <= qq(13) && qq(13) <= 1.1985090753644908E-94
+        && 0 <= qq(14) && qq(14) <= 7.143670769718235E-102
+        && 0 <= qq(15) && qq(15) <= 4.257959586213967E-109
+        && 0 <= qq(16) && qq(16) <= 2.5379416860425275E-116
+        && 0 <= qq(17) && qq(17) <= 1.5127311265722081E-123
+        && 0 <= qq(18) && qq(18) <= 9.016580144001294E-131
+        && 0 <= qq(19) && qq(19) <= 5.374300565720376E-138
+    }
+
+    private val fqBound = Array[Double](
+      0.785398032021746,
+      1.3137568957176623E-7,
+      1.2775764834046103E-14,
+      1.0862386096603872E-21,
+      8.087927686569757E-29,
+      5.199465491241273E-36,
+      3.09912293627338E-43,
+      1.8472212173184038E-50,
+      1.101029644798281E-57,
+      6.562648086537606E-65,
+      3.91164307983971E-72,
+      2.3315209626196086E-79,
+      1.3896947876331858E-86,
+      8.283226416308795E-94,
+      4.937187681382176E-101,
+      2.942793179382191E-108,
+      1.7540414210451787E-115,
+      1.0454901582271926E-122,
+      6.231606949729875E-130,
+      3.714327186185047E-137,
+    )
+
+    @pure
+    private def fqInv(fq: Array[Double]): Boolean = {
+      fq.length == 20
+        && 0 <= fq(0) && fq(0) <= 0.785398032021746
+        && 0 <= fq(1) && fq(1) <= 1.3137568957176623E-7
+        && 0 <= fq(2) && fq(2) <= 1.2775764834046103E-14
+        && 0 <= fq(3) && fq(3) <= 1.0862386096603872E-21
+        && 0 <= fq(4) && fq(4) <= 8.087927686569757E-29
+        && 0 <= fq(5) && fq(5) <= 5.199465491241273E-36
+        && 0 <= fq(6) && fq(6) <= 3.09912293627338E-43
+        && 0 <= fq(7) && fq(7) <= 1.8472212173184038E-50
+        && 0 <= fq(8) && fq(8) <= 1.101029644798281E-57
+        && 0 <= fq(9) && fq(9) <= 6.562648086537606E-65
+        && 0 <= fq(10) && fq(10) <= 3.91164307983971E-72
+        && 0 <= fq(11) && fq(11) <= 2.3315209626196086E-79
+        && 0 <= fq(12) && fq(12) <= 1.3896947876331858E-86
+        && 0 <= fq(13) && fq(13) <= 8.283226416308795E-94
+        && 0 <= fq(14) && fq(14) <= 4.937187681382176E-101
+        && 0 <= fq(15) && fq(15) <= 2.942793179382191E-108
+        && 0 <= fq(16) && fq(16) <= 1.7540414210451787E-115
+        && 0 <= fq(17) && fq(17) <= 1.0454901582271926E-122
+        && 0 <= fq(18) && fq(18) <= 6.231606949729875E-130
+        && 0 <= fq(19) && fq(19) <= 3.714327186185047E-137
+    }
+
+    private val sBound = Array[Double](
+      0.7853981633974483,
+      1.3137570234753214E-7,
+      1.2775765920284793E-14,
+      1.0862386905396692E-21,
+      8.087928206516337E-29,
+      5.1994658011535854E-36,
+      3.099123120995513E-43,
+      1.8472213274213748E-50,
+      1.1010297104247658E-57,
+      6.562648477701937E-65,
+      3.91164331299182E-72,
+      2.3315211015890957E-79,
+      1.3896948704654549E-86,
+      8.283226910027593E-94,
+      4.937187975661512E-101,
+      2.9427933547863434E-108,
+      1.7540415255942007E-115,
+      1.0454902205432658E-122,
+      6.2316073211625935E-130,
+      3.714327186185047E-137,
+    )
+
+    //// Implementations of the main parts of the algorithm ////
+
+    /**
+     * Split the input into an array of 24-bit integer chunks, represented using doubles.
+     * Leading zeros may be inserted to ensure the exponents of the chunks are multiples of `24`.
+     * @param x finite double to split
+     * @return `(e, xx)` where `e % 24 == 0` and `x == (for (i <- 0 to 4) yield xx[i] * math.scalb(1.0d, e - 24 * i)).sum` TODO: test
+     */
+    @opaque @pure
+    private def splitInput(x: Double): (Int, Array[Double]) = {
+      require(1 <= x && x.isFinite)
+      val hx = __HI(x)
+      val ix = hx & EXP_SIGNIF_BITS
+      val e0 = (ix >> 20) - 1046 // exponent - 23
+      assert(-23 <= e0 && e0 <= 1000)
+      val e = {
+        val tmp = 24 * ((e0 + 23) / 24)
+        if tmp < 24 then 24 else tmp
+      }
+      assert(24 <= e && e <= 1008 && e % 24 == 0)
+      val xx = new Array[Double](5)
+      val i0 = __HI(__LO(0.0d, __LO(x)), ix - (e << 20)) // math.scalb(x, -e)
+      xx(0) = i0.toInt.toDouble
+      val i1 = (i0 - xx(0)) * TWO24
+      xx(1) = i1.toInt.toDouble
+      val i2 = (i1 - xx(1)) * TWO24
+      xx(2) = i2.toInt.toDouble
+      val i3 = (i2 - xx(2)) * TWO24
+      xx(3) = i3.toInt.toDouble
+      val i4 = (i3 - xx(3)) * TWO24
+      xx(4) = i4.toInt.toDouble
+      (e, xx)
+    }.ensuring(res =>
+      24 <= res._1 && res._1 <= 1008 && res._1 % 24 == 0
+        && xxInv(res._2)
+    )
+
+    /**
+     * Multiply a double, represented using 24-bit chunks as `(e, xx)`, by two over pi.
+     * For efficiency, parts of the result not relevant to the Payne-Hanek range reduction are not computed.
+     * Modulo `2^24`, the result is computed within `2^-(24 * jz - 28)` of the real-valued result.
+     * @param jz used to select precision of the result
+     * @param e exponent of first bit-chunk of the input double
+     * @param xx the 24-bit integer chunks of the input double
+     * @return the result as an array of 51-bit integer chunks where the exponent at index `i` is `-24 * i`
+     */
+    @opaque @pure
+    private def timesTwoOverPi(jz: Int, e: Int, xx: Array[Double]): Array[Double] = {
+      require(0 <= jz && jz <= 15)
+      require(24 <= e && e <= 1008 && e % 24 == 0)
+      require(xxInv(xx))
+
+      val jx = xx.length - 1
+      val jv = {
+        val tmp = (e - 3) / 24
+        if tmp < 0 then 0 else tmp
+      }
+      val q0 = e - 24 * (jv + 1)
+      assert(q0 == 0) // sanity check since the input splitting is not implemented exactly as in the original
+
+      val f = new Array[Double](20)
+      var i = 0
+      (while (i <= jx + jz) {
+        decreases(jx + jz + 1 - i)
+        if jv - jx + i >= 0 then f(i) = two_over_pi(jv - jx + i).toDouble
+        i += 1
+      }).invariant(
+        0 <= i && i <= jx + jz + 1
+          && fInv(f)
+      )
+
+      val q = new Array[Double](20)
+      i = 0
+      (while (i <= jz) {
+        decreases(jz + 1 - i)
+        q(i) = xx(0) * f(i + 4) + xx(1) * f(i + 3) + xx(2) * f(i + 2) + xx(3) * f(i + 1) + xx(4) * f(i)
+        assert(Q(f(i + 4)))
+        assert(Q(f(i + 3)))
+        assert(Q(f(i + 2)))
+        assert(Q(f(i + 1)))
+        assert(Q(f(i)))
+        assert(P(q(i)))
+        i += 1
+      }).invariant(
+        0 <= i && i <= jz + 1
+          && fInv(f)
+          && qInv(q)
+      )
+
+      // If it were computed, `q(jz + 1)` would be a 51-bit integer.
+      // Hence, less than "28 bits" are missing from the computed part of `q`.
+      // Thus, the result is computed within `2^-(24 * jz - 28)` of the real result, modulo 2^24.
+      // (Carry terms from `q(jz + 2)`, `q(jz + 3)`, etc. should not affect this, see e.g. the bounds on `z` in `computeModulo()`.)
+      q
+    }.ensuring(res => qInv(res))
+
+    /**
+     * Compute `n` and `r` such that the input modulo `2 * pi` is `n * (pi / 4) + r`.
+     * @param jz highest index of `q` containing part of the input
+     * @param q input represented using 51-bit integer chunks where index `i` has exponent `-24 * i`
+     * @return `(n, neg, oneHalf, qq)` where `qq` represents the absolute value of `r` using 24-bit chunks where
+     *         index `i` has exponent `-24 * i`, `neg` is true iff `r` is negative, and `oneHalf` is true if `r == 0.5`.
+     */
+    @opaque @pure
+    private def computeModulo(jz: Int, q: Array[Double]): (Int, Boolean, Boolean, Array[Double]) = {
+      require(2 <= jz && jz < 19)
+      require(qInv(q))
+
+      val iq = new Array[Int](20)
+      var j = jz
+      var z = q(jz)
+//      val fw0 = (twon24 * z).toInt.toDouble
+//      iq(jz - j) = (z - TWO24 * fw0).toInt
+//      assert(QInt(iq(jz - j)))
+//      assert(0 <= fw0 && fw0 <= 0x500_0002)
+//      assert(P(q(j - 1)))
+//      z = q(j - 1) + fw0
+//      j -= 1
+//      val fw1 = (twon24 * z).toInt.toDouble
+//      iq(jz - j) = (z - TWO24 * fw1).toInt
+//      assert(QInt(iq(jz - j)))
+//      assert(0 <= fw1 && fw1 <= 0x500_0004)
+//      assert(P(q(j - 1)))
+//      z = q(j - 1) + fw1
+//      j -= 1
+      (while (j > 0) {
+        decreases(j)
+        val fw = (twon24 * z).toInt.toDouble
+        iq(jz - j) = (z - TWO24 * fw).toInt
+        assert(QInt(iq(jz - j)))
+        assert(0 <= fw && fw <= 0x500_0004)
+        assert(P(q(j - 1)))
+        z = q(j - 1) + fw
+        j -= 1
+      }).invariant(
+        0 <= j && j <= jz
+          && 0 <= z && z <= 5 * 0xffff_ffff_ffffL + 0x500_0004
+          && iqInv(iq)
+      )
+
+      z -= 8.0d * (z * 0.125).toLong.toDouble
+      assert(0 <= z && z < 8)
+      val neg = iq(jz - 1) >= 0x80_0000
+      val n = if neg then (z.toInt + 1) & 7 else z.toInt
+
+      var carry = 0
+      if (neg) {
+        var i = 0
+        (while (i < jz - 1) {
+          decreases(jz - i)
+          val j = iq(i)
+          assert(QInt(j))
+          iq(i) = if carry == 0 then if j != 0 then 0x100_0000 - j else 0 else 0xff_ffff - j
+          carry = if carry == 0 && j != 0 then 1 else carry
+          i += 1
+        }).invariant(
+          0 <= i && i <= jz - 1
+            && iqInv(iq) && iq(jz - 1) >= 0x80_0000
+            && (carry == 0 || carry == 1)
+        )
+        val j = iq(jz - 1)
+        iq(jz - 1) = if carry == 0 then 0x100_0000 - j else 0xff_ffff - j
+      }
+
+      assert(0 <= iq(jz - 1) && iq(jz - 1) <= 0x80_0000)
+      val oneHalf = neg && carry == 0 && iq(jz - 1) == 0x80_0000
+
+      val qq = new Array[Double](20)
+      assert(qqInv(qq))
+      if (!oneHalf) {
+        assert(iq(jz - 1) <= 0x7f_ffff)
+        var i = 0
+        (while (i < jz) {
+          decreases(jz - i)
+          assert(QInt(iq(jz - 1 - i)))
+          qq(i) = twon24Pow(i + 1) * iq(jz - 1 - i)
+          assert(0 <= qq(i) && qq(i) <= qqBound(i))
+          assert(qq.length == 20 && qqInv(qq))
+          i += 1
+        }).invariant(
+          0 <= i && i <= jz
+            && iqInv(iq) && iq(jz - 1) <= 0x7f_ffff
+            && qq.length == 20 && qqInv(qq)
+        )
+      }
+
+      (n, neg, oneHalf, qq)
+    }.ensuring(res =>
+      0 <= res._1 && res._1 < 8
+        && res._4.length == 20 && qqInv(res._4)
+    )
+
+    /**
+     * Multiply the input by 120 bits of pi over two.
+     * @param jz number of leading elements of `qq` containing part of the input
+     * @param qq the input represented by 24-bit chunks
+     * @return an array representing the result as an unevaluated sum
+     */
+    @opaque @pure
+    private def timesPiOverTwo(jz: Int, qq: Array[Double]): Array[Double] = {
+      require(0 <= jz && jz < 20)
+      require(qq.length == 20 && qqInv(qq))
+      val fq = new Array[Double](20)
+      fq(0) = PIo2(0) * qq(0)
+      assert(0 <= fq(0) && fq(0) <= fqBound(0))
+      fq(1) = PIo2(0) * qq(1) + PIo2(1) * qq(0)
+      assert(0 <= fq(1) && fq(1) <= fqBound(1))
+      fq(2) = PIo2(0) * qq(2) + PIo2(1) * qq(1) + PIo2(2) * qq(0)
+      assert(0 <= fq(2) && fq(2) <= fqBound(2))
+      fq(3) = PIo2(0) * qq(3) + PIo2(1) * qq(2) + PIo2(2) * qq(1) + PIo2(3) * qq(0)
+      assert(0 <= fq(3) && fq(3) <= fqBound(3))
+      var i = 4
+      (while (i < jz) {
+        decreases(jz - i)
+        val fw0 = PIo2(0) * qq(i - 0)
+        val fw1 = PIo2(1) * qq(i - 1)
+        val fw2 = PIo2(2) * qq(i - 2)
+        val fw3 = PIo2(3) * qq(i - 3)
+        val fw4 = PIo2(4) * qq(i - 4)
+        val fw = fw0 + fw1 + fw2 + fw3 + fw4
+        assert(0 <= fw0 && fw0 <= PIo2(0) * qqBound(i - 0))
+        assert(0 <= fw1 && fw1 <= PIo2(1) * qqBound(i - 1))
+        assert(0 <= fw2 && fw2 <= PIo2(2) * qqBound(i - 2))
+        assert(0 <= fw3 && fw3 <= PIo2(3) * qqBound(i - 3))
+        assert(0 <= fw4 && fw4 <= PIo2(4) * qqBound(i - 4))
+        assert(0 <= fw && fw <= fqBound(i))
+        fq(i) = fw
+        i += 1
+      }).invariant(
+        4 <= i && i <= jz
+          && qq.length == 20 && qqInv(qq)
+          && fq.length == 20 && fqInv(fq)
+      )
+      fq
+    }.ensuring(res =>
+      res.length == 20 && fqInv(res)
+    )
+
+    private def fast2Sum(a: Double, b: Double): (Double, Double) = {
+      require((a + b).isFinite)
+      require((if a < 0 then -a else a) >= (if b < 0 then -b else b))
+      val s = a + b
+      (s, a - s + b)
+    }.ensuring(res => res._1 + res._2 == res._1)
+
+//    private def twoSum(a: Double, b: Double): (Double, Double) = {
+//      require((a + b).isFinite)
+//      require((2 * a).isFinite)
+//      require((2 * b).isFinite)
+//      val s = a + b
+//      val a1 = s - b
+//      val b1 = s - a1
+//      val da = a - a1
+//      val db = b - b1
+//      val t = da + db
+//      (s, t)
+//    }.ensuring(res => res._1 + res._2 == res._1)
+
+    /**
+     * Compress the input to a double-double representation (a double plus a compensation term).
+     * @param jz number of leading elements of `fq` containing part of the input
+     * @param fq the input represented as an unevaluated sum
+     * @param neg true iff the input is negative
+     * @return the input represented as a double-double
+     */
+    @opaque @pure
+    private def fqCompression(jz: Int, fq: Array[Double], neg: Boolean): (Double, Double) = {
+      require(fq.length == 20 && fqInv(fq))
+      require(0 <= jz && jz < 20)
+      var s = 0.0d
+      var c = 0.0d
+      var i = jz - 1
+      // Coincidentally, this seems to be very similar to the XBLAS sum algorithm.
+      (while (i >= 0) {
+        decreases(i + 1)
+        assert(0 <= s && s <= 1)
+        // twoSum could also be used here, but it adds ~1 hour to the verification time
+        val (s1, c1) = if s >= fq(i) then fast2Sum(s, fq(i)) else fast2Sum(fq(i), s)
+        assert(s1 >= c + c1)
+        val (s2, c2) = fast2Sum(s1, c + c1)
+        s = s2
+        c = c2
+        i -= 1
+      }).invariant(
+        -1 <= i && i <= jz - 1
+          && 0 <= s && s <= sBound(i + 1) && s + c == s
+          && fq.length == 20 && fqInv(fq)
+      )
+      if neg then (-s, -c) else (s, c)
+    }.ensuring(res =>
+      -0.7853981633974483 <= res._1 && res._1 <= 0.7853981633974483 && res._1 + res._2 == res._1
+    )
+
+    //// The range reduction algorithm ////
+
+    /**
+     * Compute `x mod pi / 2` using the Payne-Hanek method,
+     * returning `y` in `[-pi / 4, pi / 4]` and `n` in `[0, 8)` such that `x == n * (pi / 4) + y` modulo `pi / 2`.
+     * @param x finite double to compute modulo `pi / 2`
+     * @return `(n, y0, y1)` where `y` is the unevaluated sum `y0 + y1`.
+     */
+    @opaque @pure
+    def __kernel_rem_pio2(x: Double): (Int, Double, Double) = {
+      require(1 <= x && x.isFinite)
+
+      // Here, `x * (2 / pi) mod 1` is computed within `2^-(24 * jz - 28)` of the real-valued result.
+      // The worst-case input, the double closest to a multiple of `pi / 2`, is `5.319372648326541E255`, for which
+      // there is 61 "extra" leading zeros in `x * (2 / pi) mod 1` due to cancellation.
+      // Hence, for correct rounding, we need to compute `x * (2 / pi) mod 1`
+      // within `2^-(61 + (desired precision) + 1)` of the real-valued result.
+      // Thus, `jz = 6` yields at least 54 "correct bits" of `x * (2 / pi) mod 1`, and `jz = 7` yields 78.
+      //
+      // In practice, a lower value of `jz` is often sufficient.
+      // Empirically, for 10's of billions of random doubles, and all single precision numbers
+      // using `jz = 5` was sufficient to compute `sin` and `cos` with 1 ulp of a reference implementation.
+      // For `5.319372648326541E255` `sin` was computed within 1 ulp, but not `cos`.
+      // For `jz = 4`, a 1 ulp result, compared to a reference implementation, was obtained for:
+      // - `cos()` for 9999997353/10000000000 random doubles (all except 2647)
+      // - `cos()` for all single precision numbers except 632
+      // - `sin()` for 9999997427/10000000000 random doubles (all except 2573)
+      // - `sin()` for all single precision numbers except 632
+      // - `sin()` for the worst-case input (but not for `cos()`)
+      // But, being within 1 ulp of a reference implementation does not necessarily imply being withing 1 ulp of the correct result.
+      // A possible performance optimization is to use an adaptive number of bits of `2 / pi`.
+
+      // TODO: test against OpenJDK's FdLibm implementation
+      // TODO: proof might be faster if `jz` is moved to the object and removed as a parameter to the methods.
+
+      val jz = 6
+      val (e, xx) = splitInput(x)
+      val q = timesTwoOverPi(jz, e, xx)
+      val (n, neg, oneHalf, qq) = computeModulo(jz, q)
+      if (oneHalf)
+        // This case should be unreachable, assuming sufficient precision is used.
+        // But, it is currently challenging to impossible to show this in stainless.
+        // It is simpler to just treat `x * (2 / pi) mod 1 ~== 0.5` as a special case.
+        (n, 0.7853981633974483d, 9.615660845819876E-18)
+      else {
+        val fq = timesPiOverTwo(jz, qq)
+        val (y0, y1) = fqCompression(jz, fq, neg)
+        (n, y0, y1)
+      }
+    }.ensuring(res =>
+      0 <= res._1 && res._1 < 8
+        && -0.7853981633974483d <= res._2 && res._2 <= 0.7853981633974483d
+        && res._2 + res._3 == res._2
+    )
+
+    //// Old Stuff ////
+
+    //    @opaque @pure
+    //    private def fqCompression(fq: Array[Double], neg: Boolean): (Double, Double) = {
+    //      require(fq.length == 20 && fqInv(fq))
+    //      val fw0 = fq(19) + fq(18) + fq(17) + fq(16) + fq(15) + fq(14) + fq(13) + fq(12) + fq(11) + fq(10) + fq(9) + fq(8) + fq(7) + fq(6) + fq(5) + fq(4) + fq(3) + fq(2) + fq(1) + fq(0)
+    //      assert(0 <= fw0 && fw0 <= 0.7853981633974483d) // math.Pi / 4 == 0.7853981633974483d
+    ////      assert(-1.0000000002328306 * 1.3137570234753214E-7 <= fq(0) - fw0)
+    ////      assert(-1.0000000001164153 * 1.3137570234753214E-7 <  = fq(0) - fw0) // INVALID
+    //      val y0 = if neg then -fw0 else fw0
+    //      val fw1 = fq(0) - fw0 + fq(1) + fq(2) + fq(3) + fq(4) + fq(5) + fq(6) + fq(7) + fq(8) + fq(9) + fq(10) + fq(11) + fq(12) + fq(13) + fq(14) + fq(15) + fq(16) + fq(17) + fq(18) + fq(19)
+    ////      assert(0 <= fw0 + fw1 && fw0 + fw1 <= 0.7853981633974483d)
+    ////      assert(-0.006135988326207402 - 6.418478184603245e-17 <= fw1 && fw1 <= 2.1792667318764053E-19 + 6.418478184603245e-17)
+    //      assert(-1.3137570234753214E-7d / 32 <= fw1) // TODO: find tighter bound
+    //      assert(fw1 <= 1.3137570234753214E-7d / 32)  // TODO: find tighter bound
+    //      val y1 = if neg then -fw1 else fw1
+    //      assume(y1 <= 1.1102230246251565E-16)
+    //      (y0, y1)
+    //    }.ensuring(res =>
+    //      -0.7853981633974483d <= res._1 && res._1 <= 0.7853981633974483d
+    //        && -1.3137570234753214E-7d / 32 <= res._2 && res._2 <= 1.3137570234753214E-7d / 32
+    //    )
+
+    @ignore @pure
     private def loop4Inv(a: Array[Double]): Boolean = {
       0 <= a(0) && a(0) <= 1.12589983973376E15 // 6.7108864E7 * 0xff_ffff
         && 0 <= a(1) && a(1) <= 6.710886E7 // 6.7108864E7 * twon24 * 0xff_ffff
@@ -308,12 +859,12 @@ object FdLibm {
         && 0 <= a(19) && a(19) <= 6.0509245062888325E-123
     }
 
-    @pure
+    @ignore @pure
     private def loop4InvNew(a: Array[Double]): Boolean = {
-      0 <= a(0) && a(0) <= 0.5                          // scalb(1.0, q0) * scalb(z2, -q0) where 0 <= z2 <= 0.5
-        && 0 <= a(1) && a(1) <= 0.9999999403953552      // scalb(1.0, q0) * twon24 * (0xff_ffff when q0 <=0; 0x7f_ffff when q0 == 1; 0x3f_ffff when q0 == 2)
-        && 0 <= a(2) && a(2) <= 2.3841856489070778E-7   // scalb(1.0, 2) * twon24 * twon24 * 0xff_ffff
-        && 0 <= a(3) && a(3) <= 1.4210853868169056E-14  // scalb(1.0, 2) * twon24 * ... * twon24 * 0xff_ffff
+      0 <= a(0) && a(0) <= 0.5 // scalb(1.0, q0) * scalb(z2, -q0) where 0 <= z2 <= 0.5
+        && 0 <= a(1) && a(1) <= 0.9999999403953552 // scalb(1.0, q0) * twon24 * (0xff_ffff when q0 <=0; 0x7f_ffff when q0 == 1; 0x3f_ffff when q0 == 2)
+        && 0 <= a(2) && a(2) <= 2.3841856489070778E-7 // scalb(1.0, 2) * twon24 * twon24 * 0xff_ffff
+        && 0 <= a(3) && a(3) <= 1.4210853868169056E-14 // scalb(1.0, 2) * twon24 * ... * twon24 * 0xff_ffff
         && 0 <= a(4) && a(4) <= 8.470328967672024E-22
         && 0 <= a(5) && a(5) <= 5.048709492487922E-29
         && 0 <= a(6) && a(6) <= 3.0092653587388526E-36
@@ -332,7 +883,7 @@ object FdLibm {
         && 0 <= a(19) && a(19) <= 3.6066320576005176E-130
     }
 
-    @pure
+    @ignore @pure
     private def loop4InvNew2(a: Array[Double], q0: Int): Boolean = {
       if (q0 == 2) {
         a(0) == 0
@@ -423,9 +974,9 @@ object FdLibm {
     }
 
     private val fwBound = Array[Double](
-      6.7108864E7,            // 6.7108864E7
-      4.0,                    // 6.7108864E7 * twon24
-      2.384185791015625E-7,   // 6.7108864E7 * twon24 * twon24
+      6.7108864E7, // 6.7108864E7
+      4.0, // 6.7108864E7 * twon24
+      2.384185791015625E-7, // 6.7108864E7 * twon24 * twon24
       1.4210854715202004E-14, // 6.7108864E7 * twon24 * ... * twon24
       8.470329472543003E-22,
       5.0487097934144756E-29,
@@ -443,29 +994,6 @@ object FdLibm {
       1.0151767349262597E-115,
       6.05092486695206E-123,
       3.606632272572553E-130,
-    )
-
-    private val twon24Pow = Array[Double](
-      1,
-      5.9604644775390625E-8,
-      3.552713678800501E-15,
-      2.1175823681357508E-22,
-      1.2621774483536189E-29,
-      7.52316384526264E-37,
-      4.4841550858394146E-44,
-      2.6727647100921956E-51,
-      1.5930919111324523E-58,
-      9.495567745759799E-66,
-      5.659799424266695E-73,
-      3.3735033418337674E-80,
-      2.0107646833859488E-87,
-      1.1985091468012028E-94,
-      7.143671195514219E-102,
-      4.2579598400081507E-109,
-      2.5379418373156492E-116,
-      1.512731216738015E-123,
-      9.016580681431383E-131,
-      5.374300886053671E-138
     )
 
     private val pow2 = Array[Double](
@@ -491,11 +1019,11 @@ object FdLibm {
       0.03125,
       0.0625,
       0.125, // ...
-      0.25,  // -2
-      0.5,   // -1
-      1.0,   // 0
-      2.0,   // 1
-      4.0,   // 2
+      0.25, // -2
+      0.5, // -1
+      1.0, // 0
+      2.0, // 1
+      4.0, // 2
     )
 
     private val iqLastBound = Array[Double](
@@ -528,7 +1056,7 @@ object FdLibm {
       0x00_0000, // 2
     )
 
-    @pure
+    @ignore @pure
     private def iqInv(iq: Array[Int], jz: Int, q0: Int): Boolean = {
       require(0 <= jz && jz < 20)
       require(-24 <= q0 && q0 < 3)
@@ -539,6 +1067,7 @@ object FdLibm {
         && (q0 != 2 || iq(jz - 1) <= 0x1f_ffff)
     }
 
+    @ignore
     private def QQUB(i: Int, q0: Int): Double = {
       require(0 <= i && i < 20)
       require(-24 <= q0 && q0 < 3)
@@ -553,6 +1082,7 @@ object FdLibm {
       }
     }
 
+    @ignore
     private def QQ(qq: Double, i: Int, jz: Int, q0: Int): Boolean = {
       require(0 <= i && i < 20)
       require(0 <= jz && jz < 20)
@@ -568,6 +1098,7 @@ object FdLibm {
       }
     }
 
+    @ignore
     private def FQ(fq: Double, i: Int, jz: Int, q0: Int): Boolean = {
       require(0 <= i && i < 20)
       require(0 <= jz && jz < 20)
@@ -599,21 +1130,21 @@ object FdLibm {
           + PIo2(3) * (pow2(24 + q0) * twon24Pow(i - 3) * 0xff_ffff)
     }
 
-    @pure
+    @ignore @pure
     private def qqInv2(qq: Array[Double], jz: Int, q0: Int): Boolean = {
       require(0 <= jz && jz < 20)
       require(-24 <= q0 && q0 < 3)
       qq.length == 20 && forall((x: Int) => !(0 <= x && x < 20) || QQ(qq(x), x, jz, q0))
     }
 
-    @pure
-    private def qqInv(qq: Array[Double], jz: Int, q0: Int): Boolean = {
+    @ignore @pure
+    private def qqInvOld(qq: Array[Double], jz: Int, q0: Int): Boolean = {
       require(1 <= jz && jz <= 20)
       require(-24 <= q0 && q0 < 3)
       val fw0 = pow2(24 + q0)
       qq.length == 20
         && 0 <= qq(0) && qq(0) <= fw0 * 1 * iqLastBound(24 + q0)
-//        && 0 <= qq(1) && qq(1) <= pow2(24 + q0) * twon24Pow(1) * iqLastBound(24 + q0)
+        //        && 0 <= qq(1) && qq(1) <= pow2(24 + q0) * twon24Pow(1) * iqLastBound(24 + q0)
         && 0 <= qq(2) && qq(2) <= fw0 * 3.552713678800501E-15 * 0xff_ffff
         && 0 <= qq(3) && qq(3) <= fw0 * 2.1175823681357508E-22 * 0xff_ffff
         && 0 <= qq(4) && qq(4) <= fw0 * 1.2621774483536189E-29 * 0xff_ffff
@@ -634,14 +1165,14 @@ object FdLibm {
         && 0 <= qq(19) && qq(19) <= fw0 * 5.374300886053671E-138 * 0xff_ffff
     }
 
-    @pure
-    private def fqInv(fq: Array[Double], jz: Int, q0: Int): Boolean = {
+    @ignore @pure
+    private def fqInvOld(fq: Array[Double], jz: Int, q0: Int): Boolean = {
       require(0 <= jz && jz < 20)
       require(-24 <= q0 && q0 < 3)
       fq.length == 20 && forall((x: Int) => !(0 <= x && x < 20) || FQ(fq(x), x, jz, q0))
     }
 
-    private val qqBound = Array[Double](
+    private val qqBoundOld = Array[Double](
       1.12589983973376E15,
       6.710886E7,
       3.999999761581421,
@@ -664,7 +1195,7 @@ object FdLibm {
       6.0509245062888325E-123,
     )
 
-    private val fqBound = Array[Double](
+    private val fqBoundOld = Array[Double](
       1.76855924758968E15,
       1.9041741265023708E8,
       17.418702994662283,
@@ -687,7 +1218,7 @@ object FdLibm {
       3.5728036522162535E-122,
     )
 
-    @pure
+    @ignore @pure
     private def loop5Inv(fq: Array[Double]): Boolean = {
       require(fq.length == 20)
       0 <= fq(0) && fq(0) <= 1.76855924758968E15
@@ -712,18 +1243,14 @@ object FdLibm {
         && 0 <= fq(19) && fq(19) <= 3.5728036522162535E-122
     }
 
-    @pure
+    @ignore @pure
     private def magic(b: Double, n: Double, i: Int): Double = {
       decreases(i)
       if i == 0 then b else n * magic(b, n, i - 1)
     }
 
-    private def P(x: Double): Boolean = 0 <= x && x <= 5 * 0xffff_ffff_ffffL
-    private def Q(x: Double): Boolean = 0 <= x && x <= 0xff_ffff
-    private def QInt(x: Int): Boolean = 0 <= x && x <= 0xff_ffff
-
-    @opaque
-    def invertTest(iq: Array[Int], q0: Int): Double = {
+    @ignore @opaque
+    private def invertTest(iq: Array[Int], q0: Int): Double = {
       require(-24 <= q0 && q0 < 3)
       require(iq.length == 20 && all20Int(iq, QInt))
       val jz = 7
@@ -760,38 +1287,38 @@ object FdLibm {
       assert(q0 != 1 || iq(jz - 1) <= 0x3f_ffff)
       assert(q0 != 2 || iq(jz - 1) <= 0x1f_ffff)
 
-//      assume(0 <= OpenJDKMath.scalb(1.0d, q0)) // TODO
-//      val z = if ih == 2 then if carry != 0 then (1.0 - z1) - OpenJDKMath.scalb(1.0, q0) else 1.0 - z1 else z1
-//      assert(0 <= z && z <= 0.5)
+      //      assume(0 <= OpenJDKMath.scalb(1.0d, q0)) // TODO
+      //      val z = if ih == 2 then if carry != 0 then (1.0 - z1) - OpenJDKMath.scalb(1.0, q0) else 1.0 - z1 else z1
+      //      assert(0 <= z && z <= 0.5)
       0.0d
-    }//.ensuring(res =>
-//      0 <= res && res <= 0.5
-//        && iq.length == 20 && all20Int(iq, QInt)
-//    )
+    } //.ensuring(res =>
+    //      0 <= res && res <= 0.5
+    //        && iq.length == 20 && all20Int(iq, QInt)
+    //    )
 
-    @opaque
-    def loop4Test(@pure iq: Array[Int], jz: Int, q0: Int): Array[Double] = {
+    @ignore @opaque
+    private def loop4Test(@pure iq: Array[Int], jz: Int, q0: Int): Array[Double] = {
       require(0 <= jz && jz < 20)
       require(-24 <= q0 && q0 < 3)
-//      val jz = 7
+      //      val jz = 7
       require(iqInv(iq, jz, q0))
-//      require(iq.length == 20 && all20Int(iq, QInt))
-//      require(0 <= iq(jz) && iq(jz) <= 0x7f_ffff)
-//      require(q0 < 0 || iq(jz) == 0)
-//      require(q0 != 0 || iq(jz - 1) <= 0x7f_ffff)
-//      require(q0 != 1 || iq(jz - 1) <= 0x3f_ffff)
-//      require(q0 != 2 || iq(jz - 1) <= 0x1f_ffff)
+      //      require(iq.length == 20 && all20Int(iq, QInt))
+      //      require(0 <= iq(jz) && iq(jz) <= 0x7f_ffff)
+      //      require(q0 < 0 || iq(jz) == 0)
+      //      require(q0 != 0 || iq(jz - 1) <= 0x7f_ffff)
+      //      require(q0 != 1 || iq(jz - 1) <= 0x3f_ffff)
+      //      require(q0 != 2 || iq(jz - 1) <= 0x1f_ffff)
       val q = new Array[Double](20)
-//      val fw0 = OpenJDKMath.scalb(1.0, q0)
-//      var fw = fw0
+      //      val fw0 = OpenJDKMath.scalb(1.0, q0)
+      //      var fw = fw0
       val fw0 = pow2(24 + q0)
-//      assume(q0 != 2 || fw0 == 4.0d)
-//      assume(q0 != 1 || fw0 == 2.0d)
-//      assume(q0 != 0 || fw0 == 1.0d)
-//      assume(q0 >= 0 || 5.9604644775390625E-8 <= fw0 && fw0 <= 0.5d)
+      //      assume(q0 != 2 || fw0 == 4.0d)
+      //      assume(q0 != 1 || fw0 == 2.0d)
+      //      assume(q0 != 0 || fw0 == 1.0d)
+      //      assume(q0 >= 0 || 5.9604644775390625E-8 <= fw0 && fw0 <= 0.5d)
       var i = jz
       assert(-1 <= i && i <= jz)
-//      assert(0 <= fw && fw <= fw0 * twon24Pow(jz - i))
+      //      assert(0 <= fw && fw <= fw0 * twon24Pow(jz - i))
       assert(q.length == 20 && qqInv2(q, jz, q0))
       (while (i >= 0) {
         decreases(i + 1)
@@ -800,26 +1327,28 @@ object FdLibm {
         assert(q.length == 20 && qqInv2(q, jz, q0))
         val fw = fw0 * twon24Pow(jz - i)
         q(jz - i) = fw * iq(i).toDouble
-//        unfold(QQ(fw * iq(i).toDouble, jz - i, jz, q0))
+        //        unfold(QQ(fw * iq(i).toDouble, jz - i, jz, q0))
         assert(QQ(fw * iq(i).toDouble, jz - i, jz, q0))
-//        q(jz - i) = pow2(24 + q0) * twon24Pow(jz - i) * iq(i).toDouble
+        //        q(jz - i) = pow2(24 + q0) * twon24Pow(jz - i) * iq(i).toDouble
         assert(q.length == 20 && qqInv2(q, jz, q0))
         i -= 1
         assert(-1 <= i && i <= jz)
-//        assert(fw0 <= fw && fw <= fw0 * twon24Pow(jz - i))
+        //        assert(fw0 <= fw && fw <= fw0 * twon24Pow(jz - i))
         assert(q.length == 20 && qqInv2(q, jz, q0))
       }).invariant(
         -1 <= i && i <= jz
-//          && 0 <= fw && fw <= fw0 * twon24Pow(jz - i)
+          //          && 0 <= fw && fw <= fw0 * twon24Pow(jz - i)
           && q.length == 20 && qqInv2(q, jz, q0)
       )
       q
-    }//.ensuring(res =>
+    } //.ensuring(res =>
     //        res.length == 20 && loop4Inv(res)
     //      )
 
-    @opaque @pure
-    def loop5Test(qq: Array[Double], jz: Int, q0: Int): Array[Double] = {
+    @ignore
+    @opaque
+    @pure
+    private def loop5Test(qq: Array[Double], jz: Int, q0: Int): Array[Double] = {
       require(0 <= jz && jz < 20)
       require(-24 <= q0 && q0 < 3)
       require(qqInv2(qq, jz, q0))
@@ -837,436 +1366,37 @@ object FdLibm {
       val fq5 = PIo2(0) * qq(5) + PIo2(1) * qq(4) + PIo2(2) * qq(3) + PIo2(3) * qq(2)
       assert(FQ(fq5, 5, jz, q0))
 
-//      var i = 3
-//      (while (i <= jz) {
-//        decreases(jz + 1 - i)
-//        val fw0 = PIo2(0) * qq(i - 0)
-//        val fw1 = PIo2(1) * qq(i - 1)
-//        val fw2 = PIo2(2) * qq(i - 2)
-//        val fw3 = PIo2(3) * qq(i - 3)
-//        val fw = fw0 + fw1 + fw2 + fw3
-//        fq(i) = fw
-//        assert(qq(i - 0) + qq(i - 1) + qq(i - 2) + qq(i - 3) <= 0.5)
-//        assert(0 <= fw && fw <= PIo2(0) / 2)
-//        i += 1
-//      }).invariant(
-//        3 <= i && i <= jz + 1
-//          && fq.length == 20
-//      )
+      //      var i = 3
+      //      (while (i <= jz) {
+      //        decreases(jz + 1 - i)
+      //        val fw0 = PIo2(0) * qq(i - 0)
+      //        val fw1 = PIo2(1) * qq(i - 1)
+      //        val fw2 = PIo2(2) * qq(i - 2)
+      //        val fw3 = PIo2(3) * qq(i - 3)
+      //        val fw = fw0 + fw1 + fw2 + fw3
+      //        fq(i) = fw
+      //        assert(qq(i - 0) + qq(i - 1) + qq(i - 2) + qq(i - 3) <= 0.5)
+      //        assert(0 <= fw && fw <= PIo2(0) / 2)
+      //        i += 1
+      //      }).invariant(
+      //        3 <= i && i <= jz + 1
+      //          && fq.length == 20
+      //      )
       fq
     }
-
-    @pure
-    private def xxInv(xx: Array[Double]): Boolean = {
-      require(xx.length == 5)
-      0 <= xx(0) && xx(0) <= 0xff_ffff
-        && 0 <= xx(1) && xx(1) <= 0xff_ffff
-        && 0 <= xx(2) && xx(2) <= 0xff_ffff
-        && 0 <= xx(3) && xx(3) <= 0xff_ffff
-        && 0 <= xx(4) && xx(4) <= 0xff_ffff
-    }
-
-    private val qqBoundFinal = Array[Double](
-      0.4999999403953552,
-      5.9604641222676946E-8,
-      3.552713467042264E-15,
-      2.117582241918006E-22,
-      1.2621773731219804E-29,
-      7.5231633968471315E-37,
-      4.4841548185629436E-44,
-      2.6727645507830045E-51,
-      1.5930918161767748E-58,
-      9.495567179779856E-66,
-      5.659799086916361E-73,
-      3.373503140757299E-80,
-      2.0107645635350341E-87,
-      1.1985090753644908E-94,
-      7.143670769718235E-102,
-      4.257959586213967E-109,
-      2.5379416860425275E-116,
-      1.5127311265722081E-123,
-      9.016580144001294E-131,
-      5.374300565720376E-138,
-    )
-
-    @pure
-    private def qqInvFinal(qq: Array[Double]): Boolean = {
-      require(qq.length == 20)
-      0 <= qq(0) && qq(0) <= 0.4999999403953552
-        && 0 <= qq(1) && qq(1) <= 5.9604641222676946E-8
-        && 0 <= qq(2) && qq(2) <= 3.552713467042264E-15
-        && 0 <= qq(3) && qq(3) <= 2.117582241918006E-22
-        && 0 <= qq(4) && qq(4) <= 1.2621773731219804E-29
-        && 0 <= qq(5) && qq(5) <= 7.5231633968471315E-37
-        && 0 <= qq(6) && qq(6) <= 4.4841548185629436E-44
-        && 0 <= qq(7) && qq(7) <= 2.6727645507830045E-51
-        && 0 <= qq(8) && qq(8) <= 1.5930918161767748E-58
-        && 0 <= qq(9) && qq(9) <= 9.495567179779856E-66
-        && 0 <= qq(10) && qq(10) <= 5.659799086916361E-73
-        && 0 <= qq(11) && qq(11) <= 3.373503140757299E-80
-        && 0 <= qq(12) && qq(12) <= 2.0107645635350341E-87
-        && 0 <= qq(13) && qq(13) <= 1.1985090753644908E-94
-        && 0 <= qq(14) && qq(14) <= 7.143670769718235E-102
-        && 0 <= qq(15) && qq(15) <= 4.257959586213967E-109
-        && 0 <= qq(16) && qq(16) <= 2.5379416860425275E-116
-        && 0 <= qq(17) && qq(17) <= 1.5127311265722081E-123
-        && 0 <= qq(18) && qq(18) <= 9.016580144001294E-131
-        && 0 <= qq(19) && qq(19) <= 5.374300565720376E-138
-    }
-
-    private val fqBoundFinal = Array[Double](
-      0.785398032021746,
-      1.3137568957176623E-7,
-      1.2775764834046103E-14,
-      1.0862386096603872E-21,
-      8.087927686569757E-29,
-      5.199465491241273E-36,
-      3.09912293627338E-43,
-      1.8472212173184038E-50,
-      1.101029644798281E-57,
-      6.562648086537606E-65,
-      3.91164307983971E-72,
-      2.3315209626196086E-79,
-      1.3896947876331858E-86,
-      8.283226416308795E-94,
-      4.937187681382176E-101,
-      2.942793179382191E-108,
-      1.7540414210451787E-115,
-      1.0454901582271926E-122,
-      6.231606949729875E-130,
-      3.714327186185047E-137,
-    )
-
-    @pure
-    private def fqInvFinal(fq: Array[Double]): Boolean = {
-      require(fq.length == 20)
-      0 <= fq(0) && fq(0) <= 0.785398032021746
-        && 0 <= fq(1) && fq(1) <= 1.3137568957176623E-7
-        && 0 <= fq(2) && fq(2) <= 1.2775764834046103E-14
-        && 0 <= fq(3) && fq(3) <= 1.0862386096603872E-21
-        && 0 <= fq(4) && fq(4) <= 8.087927686569757E-29
-        && 0 <= fq(5) && fq(5) <= 5.199465491241273E-36
-        && 0 <= fq(6) && fq(6) <= 3.09912293627338E-43
-        && 0 <= fq(7) && fq(7) <= 1.8472212173184038E-50
-        && 0 <= fq(8) && fq(8) <= 1.101029644798281E-57
-        && 0 <= fq(9) && fq(9) <= 6.562648086537606E-65
-        && 0 <= fq(10) && fq(10) <= 3.91164307983971E-72
-        && 0 <= fq(11) && fq(11) <= 2.3315209626196086E-79
-        && 0 <= fq(12) && fq(12) <= 1.3896947876331858E-86
-        && 0 <= fq(13) && fq(13) <= 8.283226416308795E-94
-        && 0 <= fq(14) && fq(14) <= 4.937187681382176E-101
-        && 0 <= fq(15) && fq(15) <= 2.942793179382191E-108
-        && 0 <= fq(16) && fq(16) <= 1.7540414210451787E-115
-        && 0 <= fq(17) && fq(17) <= 1.0454901582271926E-122
-        && 0 <= fq(18) && fq(18) <= 6.231606949729875E-130
-        && 0 <= fq(19) && fq(19) <= 3.714327186185047E-137
-    }
-
-    private val sBound = Array[Double](
-      0.7853981633974483,
-      1.3137570234753214E-7,
-      1.2775765920284793E-14,
-      1.0862386905396692E-21,
-      8.087928206516337E-29,
-      5.1994658011535854E-36,
-      3.099123120995513E-43,
-      1.8472213274213748E-50,
-      1.1010297104247658E-57,
-      6.562648477701937E-65,
-      3.91164331299182E-72,
-      2.3315211015890957E-79,
-      1.3896948704654549E-86,
-      8.283226910027593E-94,
-      4.937187975661512E-101,
-      2.9427933547863434E-108,
-      1.7540415255942007E-115,
-      1.0454902205432658E-122,
-      6.2316073211625935E-130,
-      3.714327186185047E-137,
-    )
-
-
-    @opaque @pure
-    private def splitInput(x: Double): (Int, Array[Double]) = {
-      require(1 <= x && x.isFinite)
-      val hx = __HI(x)
-      val ix = hx & EXP_SIGNIF_BITS
-      val e0 = (ix >> 20) - 1046 // exponent - 23
-      assume(-23 <= e0 && e0 <= 1000) // TODO: x <= 1 ==> exponent is in [0, 1023]
-      val e = {
-        val tmp = 24 * ((e0 + 23) / 24)
-        if tmp < 24 then 24 else tmp
-      }
-      assert(24 <= e && e <= 1008 && e % 24 == 0)
-      val xx = new Array[Double](5)
-      val i0 = __HI(__LO(0.0d, __LO(x)), ix - (e << 20)) // math.scalb(x, -e)
-      assume(i0 >= 0) // TODO: i0 is non-negative
-      xx(0) = i0.toInt.toDouble
-      assume(0 <= xx(0) && xx(0) <= 0xff_ffff) // TODO: xx(0) is a 24-bit integer
-      val i1 = (i0 - xx(0)) * TWO24
-      xx(1) = i1.toInt.toDouble
-      val i2 = (i1 - xx(1)) * TWO24
-      xx(2) = i2.toInt.toDouble
-      val i3 = (i2 - xx(2)) * TWO24
-      xx(3) = i3.toInt.toDouble
-      val i4 = (i3 - xx(3)) * TWO24
-      xx(4) = i4.toInt.toDouble
-      (e, xx)
-    }.ensuring(res =>
-      24 <= res._1 && res._1 <= 1008 && res._1 % 24 == 0
-        && res._2.length == 5 && xxInv(res._2)
-    )
-
-    @opaque @pure
-    private def timesTwoOverPi(jz: Int, e: Int, xx: Array[Double]): Array[Double] = {
-      require(0 <= jz && jz <= 15)
-      require(24 <= e && e <= 1008 && e % 24 == 0)
-      require(xx.length == 5 && xxInv(xx))
-
-      val jx = xx.length - 1
-      val jv = {
-        val tmp = (e - 3) / 24
-        if tmp < 0 then 0 else tmp
-      }
-      val q0 = e - 24 * (jv + 1)
-      assert(q0 == 0) // sanity check since the input splitting is not implemented exactly as in the original
-
-      val f = new Array[Double](20)
-      var i = 0
-      (while (i <= jx + jz) {
-        decreases(jx + jz + 1 - i)
-        if jv - jx + i >= 0 then f(i) = two_over_pi(jv - jx + i).toDouble
-        i += 1
-      }).invariant(
-        0 <= i && i <= jx + jz + 1
-          && f.length == 20 && all20(f, Q)
-      )
-
-      val q = new Array[Double](20)
-      i = 0
-      (while (i <= jz) {
-        decreases(jz + 1 - i)
-        q(i) = xx(0) * f(i + 4) + xx(1) * f(i + 3) + xx(2) * f(i + 2) + xx(3) * f(i + 1) + xx(4) * f(i)
-        assert(Q(f(i + 4)))
-        assert(Q(f(i + 3)))
-        assert(Q(f(i + 2)))
-        assert(Q(f(i + 1)))
-        assert(Q(f(i)))
-        assert(P(q(i)))
-        i += 1
-      }).invariant(
-        0 <= i && i <= jz + 1
-          && f.length == 20 && all20(f, Q)
-          && q.length == 20 && all20(q, P)
-      )
-
-      q
-    }.ensuring(res =>
-      res.length == 20 && all20(res, P)
-    )
-
-    @opaque @pure
-    private def computeModulo(jz: Int, q: Array[Double]): (Int, Boolean, Array[Double]) = {
-      require(2 <= jz && jz < 19)
-      require(q.length == 20 && all20(q, P))
-
-      val iq = new Array[Int](20)
-      var j = jz
-      var z = q(jz)
-//      val fw0 = (twon24 * z).toInt.toDouble
-//      iq(jz - j) = (z - TWO24 * fw0).toInt
-//      assert(QInt(iq(jz - j)))
-//      assert(0 <= fw0 && fw0 <= 0x500_0002)
-//      assert(P(q(j - 1)))
-//      z = q(j - 1) + fw0
-//      j -= 1
-//      val fw1 = (twon24 * z).toInt.toDouble
-//      iq(jz - j) = (z - TWO24 * fw1).toInt
-//      assert(QInt(iq(jz - j)))
-//      assert(0 <= fw1 && fw1 <= 0x500_0004)
-//      assert(P(q(j - 1)))
-//      z = q(j - 1) + fw1
-//      j -= 1
-      (while (j > 0) {
-        decreases(j)
-        val fw = (twon24 * z).toInt.toDouble
-        iq(jz - j) = (z - TWO24 * fw).toInt
-        assert(QInt(iq(jz - j)))
-        assert(0 <= fw && fw <= 0x500_0004)
-        assert(P(q(j - 1)))
-        z = q(j - 1) + fw
-        j -= 1
-      }).invariant(
-        0 <= j && j <= jz
-          && 0 <= z && z <= 5 * 0xffff_ffff_ffffL + 0x500_0004
-          && iq.length == 20 && all20Int(iq, QInt)
-      )
-
-      z -= 8.0d * (z * 0.125).toLong.toDouble
-      assert(0 <= z && z < 8)
-      val neg = iq(jz - 1) >= 0x80_0000
-      val n = if neg then (z.toInt + 1) & 7 else z.toInt
-
-      if (neg) {
-        var carry = 0
-        var i = 0
-        (while (i < jz) {
-          decreases(jz - i)
-          val j = iq(i)
-          assert(QInt(j))
-          assume(i != jz - 1 || carry == 1) // TODO: implement special case for when q represents exactly 0.5
-          iq(i) = if carry == 0 then if j != 0 then 0x100_0000 - j else 0 else 0xff_ffff - j
-          carry = if carry == 0 && j != 0 then 1 else carry
-          i += 1
-        }).invariant(
-          0 <= i && i <= jz
-            && iq.length == 20 && all20Int(iq, QInt)
-            && (carry == 0 || carry == 1)
-            && (i == jz || iq(jz - 1) >= 0x80_0000)
-            && (i != jz || iq(jz - 1) <= 0x7f_ffff)
-        )
-      }
-
-      val qq = new Array[Double](20)
-      assert(qqInvFinal(qq))
-      var i = 0
-      (while (i < jz) {
-        decreases(jz - i)
-        assert(QInt(iq(jz - 1 - i)))
-        qq(i) = twon24Pow(i + 1) * iq(jz - 1 - i)
-        assert(0 <= qq(i) && qq(i) <= qqBoundFinal(i))
-        assert(qq.length == 20 && qqInvFinal(qq))
-        i += 1
-      }).invariant(
-        0 <= i && i <= jz
-          && iq.length == 20 && all20Int(iq, QInt) && iq(jz - 1) <= 0x7f_ffff
-          && qq.length == 20 && qqInvFinal(qq)
-      )
-
-      (n, neg, qq)
-    }.ensuring(res =>
-      0 <= res._1 && res._1 < 8
-        && res._3.length == 20 && qqInvFinal(res._3)
-    )
-
-    @opaque @pure
-    private def timesPiOverTwo(jz: Int, qq: Array[Double]): Array[Double] = {
-      require(0 <= jz && jz < 20)
-      require(qq.length == 20 && qqInvFinal(qq))
-      val fq = new Array[Double](20)
-      fq(0) = PIo2(0) * qq(0)
-      assert(0 <= fq(0) && fq(0) <= fqBoundFinal(0))
-      fq(1) = PIo2(0) * qq(1) + PIo2(1) * qq(0)
-      assert(0 <= fq(1) && fq(1) <= fqBoundFinal(1))
-      fq(2) = PIo2(0) * qq(2) + PIo2(1) * qq(1) + PIo2(2) * qq(0)
-      assert(0 <= fq(2) && fq(2) <= fqBoundFinal(2))
-      fq(3) = PIo2(0) * qq(3) + PIo2(1) * qq(2) + PIo2(2) * qq(1) + PIo2(3) * qq(0)
-      assert(0 <= fq(3) && fq(3) <= fqBoundFinal(3))
-      var i = 4
-      (while (i < jz) {
-        decreases(jz - i)
-        val fw0 = PIo2(0) * qq(i - 0)
-        val fw1 = PIo2(1) * qq(i - 1)
-        val fw2 = PIo2(2) * qq(i - 2)
-        val fw3 = PIo2(3) * qq(i - 3)
-        val fw4 = PIo2(4) * qq(i - 4)
-        val fw = fw0 + fw1 + fw2 + fw3 + fw4
-        assert(0 <= fw0 && fw0 <= PIo2(0) * qqBoundFinal(i - 0))
-        assert(0 <= fw1 && fw1 <= PIo2(1) * qqBoundFinal(i - 1))
-        assert(0 <= fw2 && fw2 <= PIo2(2) * qqBoundFinal(i - 2))
-        assert(0 <= fw3 && fw3 <= PIo2(3) * qqBoundFinal(i - 3))
-        assert(0 <= fw4 && fw4 <= PIo2(4) * qqBoundFinal(i - 4))
-        assert(0 <= fw && fw <= fqBoundFinal(i))
-        fq(i) = fw
-        i += 1
-      }).invariant(
-        4 <= i && i <= jz
-          && qq.length == 20 && qqInvFinal(qq)
-          && fq.length == 20 && fqInvFinal(fq)
-      )
-      fq
-    }.ensuring(res =>
-      res.length == 20 && fqInvFinal(res)
-    )
-
-    def fast2Sum(a: Double, b: Double): (Double, Double) = {
-      require((a + b).isFinite)
-      require((if a < 0 then -a else a) >= (if b < 0 then -b else b))
-      val s = a + b
-      (s, a - s + b)
-    }.ensuring(res => res._1 + res._2 == res._1)
-
-    @opaque @pure
-    private def fqCompression2(jz: Int, fq: Array[Double], neg: Boolean): (Double, Double) = {
-      require(fq.length == 20 && fqInvFinal(fq))
-      require(0 <= jz && jz < 20)
-      var s = 0.0d
-      var c = 0.0d
-      var i = jz - 1
-      (while (i >= 0) {
-        decreases(i + 1)
-        assume(0 <= s && s <= 1)
-        val (s1, c1) = if s >= fq(i) then fast2Sum(s, fq(i)) else fast2Sum(fq(i), s)
-        assert(s1 >= c + c1)
-        val (s2, c2) = fast2Sum(s1, c + c1)
-        s = s2
-        c = c2
-        i -= 1
-      }).invariant(
-        -1 <= i && i <= jz - 1
-          && 0 <= s && s <= sBound(i + 1) && s + c == s
-          && fq.length == 20 && fqInvFinal(fq)
-      )
-      if neg then (-s, -c) else (s, c)
-    }.ensuring(res =>
-      -0.7853981633974483 <= res._1 && res._1 <= 0.7853981633974483 && res._1 + res._2 == res._1
-    )
-
-    @opaque @pure
-    private def fqCompression(fq: Array[Double], neg: Boolean): (Double, Double) = {
-      require(fq.length == 20 && fqInvFinal(fq))
-      val fw0 = fq(19) + fq(18) + fq(17) + fq(16) + fq(15) + fq(14) + fq(13) + fq(12) + fq(11) + fq(10) + fq(9) + fq(8) + fq(7) + fq(6) + fq(5) + fq(4) + fq(3) + fq(2) + fq(1) + fq(0)
-      assert(0 <= fw0 && fw0 <= 0.7853981633974483d) // math.Pi / 4 == 0.7853981633974483d
-//      assert(-1.0000000002328306 * 1.3137570234753214E-7 <= fq(0) - fw0)
-//      assert(-1.0000000001164153 * 1.3137570234753214E-7 <  = fq(0) - fw0) // INVALID
-      val y0 = if neg then -fw0 else fw0
-      val fw1 = fq(0) - fw0 + fq(1) + fq(2) + fq(3) + fq(4) + fq(5) + fq(6) + fq(7) + fq(8) + fq(9) + fq(10) + fq(11) + fq(12) + fq(13) + fq(14) + fq(15) + fq(16) + fq(17) + fq(18) + fq(19)
-//      assert(0 <= fw0 + fw1 && fw0 + fw1 <= 0.7853981633974483d)
-//      assert(-0.006135988326207402 - 6.418478184603245e-17 <= fw1 && fw1 <= 2.1792667318764053E-19 + 6.418478184603245e-17)
-      assert(-1.3137570234753214E-7d / 32 <= fw1) // TODO: find tighter bound
-      assert(fw1 <= 1.3137570234753214E-7d / 32)  // TODO: find tighter bound
-      val y1 = if neg then -fw1 else fw1
-      assume(y1 <= 1.1102230246251565E-16)
-      (y0, y1)
-    }.ensuring(res =>
-      -0.7853981633974483d <= res._1 && res._1 <= 0.7853981633974483d
-        && -1.3137570234753214E-7d / 32 <= res._2 && res._2 <= 1.3137570234753214E-7d / 32
-    )
-
-    @pure
-    def __kernel_rem_pio2_final_attempt(x: Double): (Int, Double, Double) = {
-      require(1 <= x && x.isFinite)
-
-      val jz = 7
-      val (e, xx) = splitInput(x)
-      val q = timesTwoOverPi(jz, e, xx)
-      val (n, neg, qq) = computeModulo(jz, q)
-      val fq = timesPiOverTwo(jz, qq)
-      val (y0, y1) = fqCompression2(jz, fq, neg)
-
-      (n, y0, y1)
-    }.ensuring(res =>
-      0 <= res._1 && res._1 < 8
-        && -0.7853981633974483d <= res._2 && res._2 <= 0.7853981633974483d && res._2 + res._3 == res._2
-//        && -1.3137570234753214E-7d / 32 <= res._3 && res._3 <= 1.3137570234753214E-7d / 32
-    )
 
     // assume that `nx == 3` and `prec == 2`
-    def __kernel_rem_pio2_unrolling(x: (Double, Double, Double), e0: Int): (Int, (Double, Double)) = {
+    @ignore
+    private def __kernel_rem_pio2_unrolling(x: (Double, Double, Double), e0: Int): (Int, (Double, Double)) = {
       require(0 <= e0 && e0 <= 1023)
       require(0 <= x._1 && x._1 <= 0xff_ffff)
       require(0 <= x._2 && x._2 <= 0xff_ffff)
       require(0 <= x._3 && x._3 <= 0xff_ffff)
+
+      @extern
+      @pure
+      def assume(P: Boolean): Unit = {}.ensuring(P)
+
 //      val jk = 4
 //      val jp = 4
       val jz = 7
@@ -1694,12 +1824,12 @@ object FdLibm {
           val fw2 = PIo2(2) * qq(i - 2)
           val fw3 = PIo2(3) * qq(i - 3)
           val fw = fw0 + fw1 + fw2 + fw3
-          assert(0 <= fw0 && fw0 <= PIo2(0) * qqBound(i - 0))
-          assert(0 <= fw1 && fw1 <= PIo2(1) * qqBound(i - 1))
-          assert(0 <= fw2 && fw2 <= PIo2(2) * qqBound(i - 2))
-          assert(0 <= fw3 && fw3 <= PIo2(3) * qqBound(i - 3))
+          assert(0 <= fw0 && fw0 <= PIo2(0) * qqBoundOld(i - 0))
+          assert(0 <= fw1 && fw1 <= PIo2(1) * qqBoundOld(i - 1))
+          assert(0 <= fw2 && fw2 <= PIo2(2) * qqBoundOld(i - 2))
+          assert(0 <= fw3 && fw3 <= PIo2(3) * qqBoundOld(i - 3))
           fq(i) = fw
-          assert(0 <= fq(i) && fq(i) <= fqBound(i))
+          assert(0 <= fq(i) && fq(i) <= fqBoundOld(i))
           i += 1
         }).invariant(
           3 <= i && i <= jz + 1
@@ -1714,8 +1844,9 @@ object FdLibm {
 
       (0, (0, 0))
     }
-    
-    def __kernel_rem_pio2_prec_2_simplified_functional(x: (Double, Double, Double), e0: Int): (Int, (Double, Double)) = {
+
+    @ignore
+    private def __kernel_rem_pio2_prec_2_simplified_functional(x: (Double, Double, Double), e0: Int): (Int, (Double, Double)) = {
       require(-1024 <= e0 && e0 <= 1024)
       val iq = new Array[Int](20)
       val f = new Array[Double](20)
@@ -1841,17 +1972,19 @@ object FdLibm {
       (0, (0, 0))
     }
 
-    def loop1Post(jx: Int, jz: Int, jv: Int, f: Array[Double]): Boolean = {
+    @ignore
+    private def loop1Post(jx: Int, jz: Int, jv: Int, f: Array[Double]): Boolean = {
       f.length == 20 && forall((x: Int) => !(0 <= x && x <= jx + jz) || f(x) == (if jv - jx + x < 0 then 0.0d else two_over_pi(x).toDouble))
     }
 
-    def bounded_forall_double(lo: Int, hi: Int, a: Array[Double], P: Double => Boolean): Boolean = {
+    @ignore
+    private def bounded_forall_double(lo: Int, hi: Int, a: Array[Double], P: Double => Boolean): Boolean = {
       decreases(hi - lo + 1)
       if hi < lo then true else P(a(hi - 1)) && bounded_forall_double(lo, hi - 1, a, P)
     }.ensuring(_ => a == old(a) && a.length == old(a).length)
 
-    @opaque
-    def loop1___(jx: Int, jz: Int, jv: Int): Array[Double] = {
+    @ignore @opaque
+    private def loop1___(jx: Int, jz: Int, jv: Int): Array[Double] = {
       require(0 <= jx && jx <= 2)
       require(0 <= jz && jz <= 17)
       require(0 <= jv && jv <= 100)
@@ -1869,7 +2002,8 @@ object FdLibm {
       f
     }.ensuring(res => loop1Post(jx, jz, jv, res))
 
-    def __kernel_rem_pio2_prec_2_simplified(x: (Double, Double, Double), e0: Int): (Int, (Double, Double)) = {
+    @ignore
+    private def __kernel_rem_pio2_prec_2_simplified(x: (Double, Double, Double), e0: Int): (Int, (Double, Double)) = {
       import stainless.lang.StaticChecks.*
       require(-1023 <= e0 && e0 <= 1023)
       require(0 <= x._1 && x._1 <= 0xff_ffff)
@@ -2137,8 +2271,8 @@ object FdLibm {
 //      (0, (0, 0))
     }
 
-    @extern
-    def __kernel_rem_pio2_prec_2(x: (Double, Double, Double), e0: Int, nx: Int): (Int, (Double, Double)) = {
+    @ignore @extern
+    private def __kernel_rem_pio2_prec_2(x: (Double, Double, Double), e0: Int, nx: Int): (Int, (Double, Double)) = {
 //      var jz = 0
       var carry = 0
 //      var n = 0
@@ -2399,10 +2533,10 @@ object FdLibm {
   }
 
   @ignore
-  def main(argv: Array[String]): Unit = {
-    Sin.sin(scala.math.scalb(1.0d, 25) + 0.5)
-    var r = scala.util.Random
-    r.setSeed(123456)
+  def testSin(): Unit = {
+    var errors = 0
+    val r = scala.util.Random
+    r.setSeed(123)
     var j: Long = 0
     var i: Long = Int.MinValue
     val s1 = Sin.sin(5.319372648326541E255)
@@ -2410,40 +2544,104 @@ object FdLibm {
     val diff = Math.abs(s1 - s2)
     val ulp = Math.min(Math.ulp(s1), Math.ulp(s2))
     if diff > ulp then {
-      println(s"error: d = worst-case, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
-      j = 10000000000L
-      i = Int.MaxValue
+//      println(s"[sin] error: d = worst-case, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
+//      j = 10000000000L + 1
+//      i = Int.MaxValue.toLong + 1
+      errors += 1
     }
+    println(s"[sin] errors, worst-case: $errors")
+    errors = 0
     while (j <= 10000000000L) {
       val d = java.lang.Double.longBitsToDouble(r.nextLong())
       if (j % 10000000 == 0)
-        println(s"progress: $j")
+        println(s"[sin] progress: $j")
       val s1 = Sin.sin(d)
       val s2 = Math.sin(d)
       val diff = Math.abs(s1 - s2)
       val ulp = Math.min(Math.ulp(s1), Math.ulp(s2))
       if diff > ulp then {
-        println(s"error: d = $d, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
-        j = 1000000000
-        i = Int.MaxValue
+//        println(s"[sin] error: d = $d, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
+//        j = 10000000000L + 1
+//        i = Int.MaxValue.toLong + 1
+        errors += 1
       }
-      else
-        j += 1
+      j += 1
     }
+    println(s"[sin] errors, random doubles: $errors")
+    errors = 0
     while (i <= Int.MaxValue) {
       val d = java.lang.Float.intBitsToFloat(i.toInt).toDouble
       if (i % 100000000 == 0)
-        println(s"progress: $d")
+        println(s"[sin] progress: $d")
       val s1 = Sin.sin(d)
       val s2 = Math.sin(d)
       val diff = Math.abs(s1 - s2)
       val ulp = Math.min(Math.ulp(s1), Math.ulp(s2))
       if diff > ulp  then {
-        println(s"error: d = $d, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
-        i = Int.MaxValue
+//        println(s"[sin] error: d = $d, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
+//        i = Int.MaxValue.toLong + 1
+        errors += 1
       }
-      else
-        i += 1
+      i += 1
     }
+    println(s"[sin] errors, singles: $errors")
   }
+
+  @ignore
+  def testCos(): Unit = {
+    var errors: Long = 0
+    val r = scala.util.Random
+    r.setSeed(123)
+    var j: Long = 0
+    var i: Long = Int.MinValue
+    val s1 = Cos.cos(5.319372648326541E255)
+    val s2 = Math.cos(5.319372648326541E255)
+    val diff = Math.abs(s1 - s2)
+    val ulp = Math.min(Math.ulp(s1), Math.ulp(s2))
+    if diff > ulp then {
+//      println(s"[cos] error: d = worst-case, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
+//      j = 10000000000L + 1
+//      i = Int.MaxValue.toLong + 1
+      errors += 1
+    }
+    println(s"[cos] errors, worst-case: $errors")
+    errors = 0
+    while (j <= 10000000000L) {
+      val d = java.lang.Double.longBitsToDouble(r.nextLong())
+      if (j % 10000000 == 0)
+        println(s"[cos] progress: $j")
+      val s1 = Cos.cos(d)
+      val s2 = Math.cos(d)
+      val diff = Math.abs(s1 - s2)
+      val ulp = Math.min(Math.ulp(s1), Math.ulp(s2))
+      if diff > ulp then {
+//        println(s"[cos] error: d = $d, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
+//        j = 10000000000L + 1
+//        i = Int.MaxValue.toLong + 1
+        errors += 1
+      }
+      j += 1
+    }
+    println(s"[cos] errors, random doubles: $errors")
+    errors = 0
+    while (i <= Int.MaxValue) {
+      val d = java.lang.Float.intBitsToFloat(i.toInt).toDouble
+      if (i % 100000000 == 0)
+        println(s"[cos] progress: $d")
+      val s1 = Cos.cos(d)
+      val s2 = Math.cos(d)
+      val diff = Math.abs(s1 - s2)
+      val ulp = Math.min(Math.ulp(s1), Math.ulp(s2))
+      if diff > ulp then {
+//        println(s"[cos] error: d = $d, diff = $diff, s1 = $s1, s2 = $s2, ulp(s1) = ${Math.ulp(s1)}, ulp(s2r) = ${Math.ulp(s2)}")
+//        i = Int.MaxValue.toLong + 1
+        errors += 1
+      }
+      i += 1
+    }
+    println(s"[cos] errors, singles: $errors")
+  }
+
+  @ignore
+  def main(argv: Array[String]): Unit = {testCos(); testSin()}
 }
