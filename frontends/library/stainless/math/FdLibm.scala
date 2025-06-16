@@ -812,6 +812,279 @@ object FdLibm {
         && res._2 + res._3 == res._2
     )
 
+    //// rewrite of range reduction algorithm into a single function ////
+
+    /**
+     * Compute `x mod pi / 2` using the Payne-Hanek method,
+     * returning `y` in `[-pi / 4, pi / 4]` and `n` in `[0, 8)` such that `x == n * (pi / 4) + y` modulo `pi / 2`.
+     *
+     * @param x finite double to compute modulo `pi / 2`
+     * @return `(n, y0, y1)` where `y` is the unevaluated sum `y0 + y1`.
+     */
+    @opaque @pure
+    def __kernel_rem_pio2_inlined(x: Double): (Int, Double, Double) = {
+      require(1 <= x && x.isFinite)
+      // It takes a very long time to show some preconditions in this function, extra assertions are required;
+      // and, we get a stack overflow in Stainless after showing these pre-conditions :)
+
+      // Here, `x * (2 / pi) mod 1` is computed within `2^-(24 * jz - 28)` of the real-valued result.
+      // The worst-case input, the double closest to a multiple of `pi / 2`, is `5.319372648326541E255`, for which
+      // there is 61 "extra" leading zeros in `x * (2 / pi) mod 1` due to cancellation.
+      // Hence, for correct rounding, we need to compute `x * (2 / pi) mod 1`
+      // within `2^-(61 + (desired precision) + 1)` of the real-valued result.
+      // Thus, `jz = 6` yields at least 54 "correct bits" of `x * (2 / pi) mod 1`, and `jz = 7` yields 78.
+      //
+      // In practice, a lower value of `jz` is often sufficient.
+      // Empirically, for 10's of billions of random doubles, and all single precision numbers
+      // using `jz = 5` was sufficient to compute `sin` and `cos` with 1 ulp of a reference implementation.
+      // For `5.319372648326541E255` `sin` was computed within 1 ulp, but not `cos`.
+      // For `jz = 4`, a 1 ulp result, compared to a reference implementation, was obtained for:
+      // - `cos()` for 9999997353/10000000000 random doubles (all except 2647)
+      // - `cos()` for all single precision numbers except 632
+      // - `sin()` for 9999997427/10000000000 random doubles (all except 2573)
+      // - `sin()` for all single precision numbers except 632
+      // - `sin()` for the worst-case input (but not for `cos()`)
+      // But, being within 1 ulp of a reference implementation does not necessarily imply being withing 1 ulp of the correct result.
+      // A possible performance optimization is to use an adaptive number of bits of `2 / pi`.
+
+      // TODO: test against OpenJDK's FdLibm implementation
+
+      val jz = 6
+
+      // Step 1:
+      // Split the input `x` into an array of 24-bit integer chunks, represented using doubles.
+      // Leading zeros may be inserted to ensure the exponents of the chunks are multiples of `24`.
+      // After splitting, `e % 24 == 0` and `x == (for (i <- 0 to 4) yield xx[i] * math.scalb(1.0d, e - 24 * i)).sum`. TODO: test
+
+      val hx = __HI(x)
+      val ix = hx & EXP_SIGNIF_BITS
+      val e0 = (ix >> 20) - 1046 // exponent - 23
+      assert(-23 <= e0 && e0 <= 1000)
+      val e = {
+        val tmp = 24 * ((e0 + 23) / 24)
+        if tmp < 24 then 24 else tmp
+      }
+      assert(24 <= e && e <= 1008 && e % 24 == 0)
+      val xx = new Array[Double](5)
+      val i0 = __HI(__LO(0.0d, __LO(x)), ix - (e << 20)) // math.scalb(x, -e)
+      xx(0) = i0.toInt.toDouble
+      val i1 = (i0 - xx(0)) * TWO24
+      xx(1) = i1.toInt.toDouble
+      val i2 = (i1 - xx(1)) * TWO24
+      xx(2) = i2.toInt.toDouble
+      val i3 = (i2 - xx(2)) * TWO24
+      xx(3) = i3.toInt.toDouble
+      val i4 = (i3 - xx(3)) * TWO24
+      xx(4) = i4.toInt.toDouble
+
+      // Step 2:
+      // Multiply the double, represented using 24-bit chunks as `(e, xx)`, by two over pi.
+      // For efficiency, parts of the result not relevant to the Payne-Hanek range reduction are not computed.
+      // Modulo `2^24`, the result is computed within `2^-(24 * jz - 28)` of the real-valued result.
+      // The result is stored in the array `q` consisting of 51-bit integer chunks where the exponent at index `i` is `-24 * i`.
+
+      val jx = xx.length - 1
+      val jv = {
+        val tmp = (e - 3) / 24
+        if tmp < 0 then 0 else tmp
+      }
+      val q0 = e - 24 * (jv + 1)
+      assert(q0 == 0) // sanity check since the input splitting is not implemented exactly as in the original
+
+      val f = new Array[Double](20)
+      var i = 0
+      (while (i <= jx + jz) {
+        decreases(jx + jz + 1 - i)
+        if jv - jx + i >= 0 then f(i) = two_over_pi(jv - jx + i).toDouble
+        i += 1
+      }).invariant(
+        0 <= i && i <= jx + jz + 1
+          && xxInv(xx) && fInv(f)
+      )
+
+      val q = new Array[Double](20)
+      assert(fInv(f)) // pre-condition/invariant takes an insanely long time to show without these assertions
+      assert(qInv(q))
+      i = 0
+      (while (i <= jz) {
+        decreases(jz + 1 - i)
+        q(i) = xx(0) * f(i + 4) + xx(1) * f(i + 3) + xx(2) * f(i + 2) + xx(3) * f(i + 1) + xx(4) * f(i)
+        assert(Q(f(i + 4)))
+        assert(Q(f(i + 3)))
+        assert(Q(f(i + 2)))
+        assert(Q(f(i + 1)))
+        assert(Q(f(i)))
+        assert(P(q(i)))
+        i += 1
+      }).invariant(
+        0 <= i && i <= jz + 1
+          && fInv(f)
+          && qInv(q)
+      )
+
+      // Step 3:
+      // Compute `n` and `r` such that the input modulo `2 * pi` is `n * (pi / 4) + r`.
+      // The result consists of `(n, neg, oneHalf, qq)` where `qq` represents the absolute value of `r` using 24-bit chunks
+      // where index `i` has exponent `-24 * i`, `neg` is true iff `r` is negative, and `oneHalf` is true if `r == 0.5`.
+
+      val iq = new Array[Int](20)
+      var j = jz
+      var z = q(jz)
+      //      val fw0 = (twon24 * z).toInt.toDouble
+      //      iq(jz - j) = (z - TWO24 * fw0).toInt
+      //      assert(QInt(iq(jz - j)))
+      //      assert(0 <= fw0 && fw0 <= 0x500_0002)
+      //      assert(P(q(j - 1)))
+      //      z = q(j - 1) + fw0
+      //      j -= 1
+      //      val fw1 = (twon24 * z).toInt.toDouble
+      //      iq(jz - j) = (z - TWO24 * fw1).toInt
+      //      assert(QInt(iq(jz - j)))
+      //      assert(0 <= fw1 && fw1 <= 0x500_0004)
+      //      assert(P(q(j - 1)))
+      //      z = q(j - 1) + fw1
+      //      j -= 1
+      assert(qInv(q)) // pre-condition/invariant takes an insanely long time to show without these assertions
+      assert(iqInv(iq))
+      assert(0 <= z && z <= 5 * 0xffff_ffff_ffffL)
+      (while (j > 0) {
+        decreases(j)
+        val fw = (twon24 * z).toInt.toDouble
+        iq(jz - j) = (z - TWO24 * fw).toInt
+        assert(QInt(iq(jz - j)))
+        assert(0 <= fw && fw <= 0x500_0004)
+        assert(P(q(j - 1)))
+        z = q(j - 1) + fw
+        j -= 1
+      }).invariant(
+      0 <= j && j <= jz
+        && 0 <= z && z <= 5 * 0xffff_ffff_ffffL + 0x500_0004
+        && qInv(q) && iqInv(iq)
+      )
+
+      // If it were computed, `q(jz + 1)` would be a 51-bit integer.
+      // Hence, less than "28 bits" are missing from the computed part of `q`.
+      // Thus, the result is computed within `2^-(24 * jz - 28)` of the real result, modulo 2^24.
+      // (Carry terms from `q(jz + 2)`, `q(jz + 3)`, etc. should not affect this, see e.g. the bounds on `z` below.)
+
+      z -= 8.0d * (z * 0.125).toLong.toDouble
+      assert(0 <= z && z < 8)
+      val neg = iq(jz - 1) >= 0x80_0000
+      val n = if neg then (z.toInt + 1) & 7 else z.toInt
+
+      var carry = 0
+      if (neg) {
+        assert(iqInv(iq) && iq(jz - 1) >= 0x80_0000) // pre-condition/invariant takes an insanely long time to show without these assertions
+        var i = 0
+        (while (i < jz - 1) {
+          decreases(jz - i)
+          val j = iq(i)
+          assert(QInt(j))
+          iq(i) = if carry == 0 then if j != 0 then 0x100_0000 - j else 0 else 0xff_ffff - j
+          carry = if carry == 0 && j != 0 then 1 else carry
+          i += 1
+        }).invariant(
+          0 <= i && i <= jz - 1
+            && iqInv(iq) && iq(jz - 1) >= 0x80_0000
+            && (carry == 0 || carry == 1)
+        )
+        val j = iq(jz - 1)
+        iq(jz - 1) = if carry == 0 then 0x100_0000 - j else 0xff_ffff - j
+      }
+
+      assert(0 <= iq(jz - 1) && iq(jz - 1) <= 0x80_0000)
+      val oneHalf = neg && carry == 0 && iq(jz - 1) == 0x80_0000
+
+      val qq = new Array[Double](20)
+      if (!oneHalf) {
+        var i = 0
+        assert(iqInv(iq)) // pre-condition/invariant takes an insanely long time to show without these assertions
+        assert(qqInv(qq))
+        (while (i < jz) {
+          decreases(jz - i)
+          assert(QInt(iq(jz - 1 - i)))
+          qq(i) = twon24Pow(i + 1) * iq(jz - 1 - i)
+          assert(0 <= qq(i) && qq(i) <= qqBound(i))
+          assert(qqInv(qq))
+          i += 1
+        }).invariant(
+          0 <= i && i <= jz
+            && iqInv(iq) && iq(jz - 1) <= 0x7f_ffff
+            && qqInv(qq)
+        )
+      }
+
+      if (oneHalf)
+        // This case should be unreachable, assuming sufficient precision is used.
+        // But, it is currently challenging to impossible to show this in stainless.
+        // It is simpler to just treat `x * (2 / pi) mod 1 ~== 0.5` as a special case.
+        (n, 0.7853981633974483d, 9.615660845819876E-18)
+      else {
+        // Step 4:
+        // Multiply the `r` (stored in `qq`) by 120 bits of pi over two.
+        // The result is stored in the array `fq` as an unevaluated sum.
+        val fq = new Array[Double](20)
+        fq(0) = PIo2(0) * qq(0)
+        assert(0 <= fq(0) && fq(0) <= fqBound(0))
+        fq(1) = PIo2(0) * qq(1) + PIo2(1) * qq(0)
+        assert(0 <= fq(1) && fq(1) <= fqBound(1))
+        fq(2) = PIo2(0) * qq(2) + PIo2(1) * qq(1) + PIo2(2) * qq(0)
+        assert(0 <= fq(2) && fq(2) <= fqBound(2))
+        fq(3) = PIo2(0) * qq(3) + PIo2(1) * qq(2) + PIo2(2) * qq(1) + PIo2(3) * qq(0)
+        assert(0 <= fq(3) && fq(3) <= fqBound(3))
+        var i = 4
+        (while (i < jz) {
+          decreases(jz - i)
+          val fw0 = PIo2(0) * qq(i - 0)
+          val fw1 = PIo2(1) * qq(i - 1)
+          val fw2 = PIo2(2) * qq(i - 2)
+          val fw3 = PIo2(3) * qq(i - 3)
+          val fw4 = PIo2(4) * qq(i - 4)
+          val fw = fw0 + fw1 + fw2 + fw3 + fw4
+          assert(0 <= fw0 && fw0 <= PIo2(0) * qqBound(i - 0))
+          assert(0 <= fw1 && fw1 <= PIo2(1) * qqBound(i - 1))
+          assert(0 <= fw2 && fw2 <= PIo2(2) * qqBound(i - 2))
+          assert(0 <= fw3 && fw3 <= PIo2(3) * qqBound(i - 3))
+          assert(0 <= fw4 && fw4 <= PIo2(4) * qqBound(i - 4))
+          assert(0 <= fw && fw <= fqBound(i))
+          fq(i) = fw
+          i += 1
+        }).invariant(
+          4 <= i && i <= jz
+            && qqInv(qq) && fqInv(fq)
+        )
+
+        // Step 5:
+        // Compress the input to a double-double representation (a double plus a compensation term).
+        var s = 0.0d
+        var c = 0.0d
+        var j = jz - 1
+        // Coincidentally, this seems to be very similar to the XBLAS sum algorithm.
+        assert(fqInv(fq))
+        (while (j >= 0) {
+          decreases(j + 1)
+          assert(0 <= s && s <= 1)
+          // twoSum could also be used here, but it adds ~1 hour to the verification time
+          val (s1, c1) = if s >= fq(j) then fast2Sum(s, fq(j)) else fast2Sum(fq(j), s)
+          assert(s1 >= c + c1)
+          val (s2, c2) = fast2Sum(s1, c + c1)
+          s = s2
+          c = c2
+          j -= 1
+        }).invariant(
+        -1 <= j && j <= jz - 1
+          && 0 <= s && s <= sBound(i + 1) && s + c == s
+          && fqInv(fq)
+        )
+        val (y0, y1) = if neg then (-s, -c) else (s, c)
+        (n, y0, y1)
+      }
+    }.ensuring(res =>
+      0 <= res._1 && res._1 < 8
+        && -0.7853981633974483d <= res._2 && res._2 <= 0.7853981633974483d
+        && res._2 + res._3 == res._2
+    )
+
     //// Old Stuff ////
 
     //    @opaque @pure
