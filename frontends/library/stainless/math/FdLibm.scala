@@ -1086,6 +1086,167 @@ object FdLibm {
     )
   }
 
+  // TODO: test
+  object ASin {
+
+    @extern @pure
+    private def assume(P: Boolean): Unit = {}.ensuring(P)
+
+    def asin(x: Double): Double = {
+      val hx = __HI(x)
+      val ix = hx & EXP_SIGNIF_BITS
+      if (ix >= 0x3ff0_0000) { // |x| >= 1
+        if (((ix - 0x3ff0_0000) | __LO(x)) == 0) // |x| == 1
+          x * pio2_hi + x * pio2_lo
+        else
+          (x - x) / (x - x) // return NaN
+      }
+      else if (ix < 0x3fe0_0000) { // |x| < 0.5
+        if (ix < 0x3e40_0000 && huge + x > 1.0) // |x| < 0x1p-27 && x != 0
+          x
+        else {
+          val t = if ix < 0x3e40_0000 then x * x else 0 // if |x| < 0x1p-27
+          val w = R(t)
+          x + x * w
+        }
+      }
+      else {
+        val w = 1.0 - (if x > 0.0d then x else -x)
+//        assert(0.0d <= w && w <= 0.5d)
+        val t = w * 0.5
+//        assert(0.0d <= t && t <= 0.25d)
+        val s = math.sqrt(t)
+//        assert(0.0d <= s && s <= 0.5d)
+        val t2 = if (ix >= 0x3fef_3333) { // |x| >= 0.974999904632568359375
+          val w = R(t)
+          assert(0.0d <= w)
+          assert(w <= 0.5707963267948966d)
+          pio2_hi - (2.0d * (s + s * w) - pio2_lo)
+        } else {
+          val w = __LO(s, 0)
+          assert(0.0d <= w && w <= s && s <= 0.5d)
+//          assert(w * w <= s * s)
+//          assert(s * s <= t + 1.1102230246251565E-16)
+//          assert(w * w <= t + 1.1102230246251565E-16)
+//          assert(0.0d < s * w)
+          val c = (t - w * w) / (s * w)
+//          assume(-1e10 <= c && c <= 1e10)
+          val r = R(t)
+          assert(-1E-10 <= c && c <= 1E-10) // TIMEOUT with 100s // TIMEOUT with 1000s
+          assert(0.0d <= s * r)
+          val p2 = 2.0 * s * r - (pio2_lo - 2.0 * c)
+          assert(-pio2_lo <= p2) // TIMEOUT with 100s // TIMEOUT with 1000s
+          val q2 = pio4_hi - 2.0 * w
+          assert(q2 <= pio4_hi)
+          assert(0.0d <= pio4_hi - (p2 - q2))
+          assert(pio4_hi - (p2 - q2) <= 1.5707963267948966d) // TIMEOUT with 100s
+          pio4_hi - (p2 - q2)
+        }
+        assert(ix < 0x3fef_3333 || 0 <= t2 && t2 <= 1.5707963267948966d)
+        assert(ix >= 0x3fef_3333 || 0 <= t2 && t2 <= 1.5707963267948966d) // TIMEOUT with 100s // TIMEOUT with 1000s
+        if hx > 0 then t2 else -t2 // TIMEOUT with 100s // TIMEOUT with 1000s
+      }
+    }.ensuring(res =>
+      (!(x.isNaN || x < -1.0d || x > 1.0d) || res.isNaN)
+        && x.equiv(+0.0d) == res.equiv(+0.0d)
+        && x.equiv(-0.0d) == res.equiv(-0.0d)
+        && (!(-1.0d <= x && x <= 1.0d) || (-1.5707963267948966d <= res && res <= 1.5707963267948966d))
+    )
+
+    private def R(z: Double): Double = {
+      require(0.0d <= z && z <= 0.5d)
+      val p = z * (pS0 + z * (pS1 + z * (pS2 + z * (pS3 + z * (pS4 + z * pS5)))))
+      assert(0.0d <= p && p <= 0.025)
+      val q = 1.0d + z * (qS1 + z * (qS2 + z * (qS3 + z * qS4)))
+      assert(0.5 <= q && q <= 1.0d)
+      p / q
+    }.ensuring(res => 0 <= res && res <= 0.05d)
+
+    private val huge = 1e300d
+    private val pio2_hi = 1.57079632679489655800e+00 // 0x1.921fb54442d18p0,
+    private val pio2_lo = 6.12323399573676603587e-17 // 0x1.1a62633145c07p-54,
+    private val pio4_hi = 7.85398163397448278999e-01 // 0x1.921fb54442d18p-1,
+    private val pS0 =  1.66666666666666657415e-01 //   0x1.5555555555555p-3,
+    private val pS1 = -3.25565818622400915405e-01 //  -0x1.4d61203eb6f7dp-2,
+    private val pS2 =  2.01212532134862925881e-01 //   0x1.9c1550e884455p-3,
+    private val pS3 = -4.00555345006794114027e-02 //  -0x1.48228b5688f3bp-5,
+    private val pS4 =  7.91534994289814532176e-04 //   0x1.9efe07501b288p-11
+    private val pS5 =  3.47933107596021167570e-05 //   0x1.23de10dfdf709p-15
+    private val qS1 = -2.40339491173441421878e+00 //  -0x1.33a271c8a2d4bp1,
+    private val qS2 =  2.02094576023350569471e+00 //   0x1.02ae59c598ac8p1,
+    private val qS3 = -6.88283971605453293030e-01 //  -0x1.6066c1b8d0159p-1,
+    private val qS4 =  7.70381505559019352791e-02 //   0x1.3b8c5b12e9282p-4;
+  }
+
+  // TODO: test
+  object ACos {
+    def acos(x: Double): Double = {
+      val hx = __HI(x)
+      val ix = hx & EXP_SIGNIF_BITS
+      if (ix >= 0x3ff0_0000) {
+        if (((ix - 0x3ff0_0000) | __LO(x)) == 0)
+          if hx > 0 then 0.0 else Math.PI + 2.0 * pio2_lo
+        else
+          (x - x) / (x - x)
+      }
+      else if (ix < 0x3fe0_0000) {
+        if (ix <= 0x3fe0_0000)
+          pio2_hi + pio2_lo
+        else {
+          val z = x * x
+          val r = R(z)
+          pio2_hi - (x - (pio2_lo - x * r))
+        }
+      }
+      else if (hx < 0) {
+        val z = (1.0d + x) * 0.5
+        val s = math.sqrt(z)
+        val r = R(z)
+        val w = r * s - pio2_lo
+        Math.PI - 2.0 * (s + w)
+      }
+      else {
+        assert(0.5d <= x && x <= 1.0d)
+        val z = (1.0d - x) * 0.5
+        val s = math.sqrt(z)
+        val df = __LO(s, 0)
+        assert(0.0d <= df && df <= s && s <= 0.7071067811865476d)
+        val c = (z - df * df) / (s + df)
+        assert(-1e10 <= c && c <= 1e10) // Why does this assertion make the assertion below provable in a reasonable amount of time???
+        assert(0.0d <= df + c)
+        val r = R(z)
+        val w = r * s + c
+        assert(c <= w)
+        2.0 * (df + w) // TIMEOUT with 100s
+      }
+    }.ensuring(res =>
+      (!(x.isNaN || x < -1.0d || x > 1.0d) || res.isNaN)
+        && (!(-1.0d <= x && x <= 1.0d) || (0 <= res && res <= 3.14159265358979323846d))
+    )
+
+    private def R(z: Double): Double = {
+      require(0.0d <= z && z <= 0.5d)
+      val p = z * (pS0 + z * (pS1 + z * (pS2 + z * (pS3 + z * (pS4 + z * pS5)))))
+      assert(0.0d <= p && p <= 0.025)
+      val q = 1.0d + z * (qS1 + z * (qS2 + z * (qS3 + z * qS4)))
+      assert(0.5 <= q && q <= 1.0d)
+      p / q
+    }.ensuring(res => 0 <= res && res <= 0.05d)
+
+    private val pio2_hi = 1.57079632679489655800e+00 //  0x1.921fb54442d18p0,
+    private val pio2_lo = 6.12323399573676603587e-17 //  0x1.1a62633145c07p-54,
+    private val pS0 =  1.66666666666666657415e-01 //  0x1.5555555555555p-3,
+    private val pS1 = -3.25565818622400915405e-01 // -0x1.4d61203eb6f7dp-2,
+    private val pS2 =  2.01212532134862925881e-01 //  0x1.9c1550e884455p-3,
+    private val pS3 = -4.00555345006794114027e-02 // -0x1.48228b5688f3bp-5,
+    private val pS4 =  7.91534994289814532176e-04 //  0x1.9efe07501b288p-11,
+    private val pS5 =  3.47933107596021167570e-05 //  0x1.23de10dfdf709p-15,
+    private val qS1 = -2.40339491173441421878e+00 // -0x1.33a271c8a2d4bp1
+    private val qS2 =  2.02094576023350569471e+00 //  0x1.02ae59c598ac8p1
+    private val qS3 = -6.88283971605453293030e-01 // -0x1.6066c1b8d0159p-1
+    private val qS4 =  7.70381505559019352791e-02 //  0x1.3b8c5b12e9282p-4
+  }
+
   @ignore
   def testSin(): Unit = {
     var errors = 0
