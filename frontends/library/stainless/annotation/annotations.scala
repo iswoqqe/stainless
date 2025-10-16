@@ -113,3 +113,10 @@ class anyHeapRef extends Annotation
 
 @ignore
 class refEq extends Annotation
+
+/**
+ * Treat equality on this type as an uninterpreted predicate, i.e. does not assume it is reflexive, symmetric or
+ * transitive.
+ */
+@ignore
+class noEq extends Annotation

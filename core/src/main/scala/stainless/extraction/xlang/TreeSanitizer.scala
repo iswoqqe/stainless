@@ -4,6 +4,10 @@ package stainless
 package extraction
 package xlang
 
+import inox.utils.Graphs
+import inox.utils.Graphs.SimpleEdge
+import stainless.extraction.oo.TreeTraverser
+
 import scala.collection.mutable.ListBuffer
 
 /** Inspect trees, detecting illegal structures. */
@@ -43,6 +47,7 @@ trait TreeSanitizer { self =>
       new SoundEquality(symbols, ctx),
       new SoundInvariants(symbols, ctx),
       new AbstractValsOverride(symbols, ctx),
+      new SoundTypeVariableInstantiation(symbols, ctx)
     )
 
     checks.flatMap(_.sanitize().distinct).sortBy(_.tree.getPos)
@@ -449,6 +454,65 @@ trait TreeSanitizer { self =>
             errors += MalformedStainlessCode(desc, s"Abstract values $vals must be overridden with fields in concrete subclass")
           }
       }
+    }
+  }
+
+  private class SoundTypeVariableInstantiation(override val trees: self.trees.type, syms: Symbols, ctx: inox.Context) extends Sanitizer(syms, ctx) with OOSelfTreeTraverser {
+
+    def this(syms: Symbols, ctx: inox.Context) = this(self.trees, syms, ctx)
+
+    private var errors: ListBuffer[MalformedStainlessCode] = ListBuffer.empty
+
+    override def sanitize(): Seq[MalformedStainlessCode] = {
+      errors = ListBuffer.empty
+      symbols.classes.values.foreach(c =>
+        c.fields.foreach(
+          v =>
+            val classId = c.typed(using syms).toType.id
+            v.tpe match {
+              case FPType(_, _) => graph = graph + SimpleEdge(classId, root)
+              case ADTType(id2, _) => graph = graph + SimpleEdge(classId, id2)
+              case ClassType(id2, _) => graph = graph + SimpleEdge(classId, id2)
+              case _ => ()
+            }
+        )
+      )
+      symbols.functions.values.foreach(f => traverse(f.fullBody))
+      errors.toSeq
+    }
+
+    private val root = FreshIdentifier.apply("NonStruct")
+    private var graph = Graphs.DiGraph[Identifier, SimpleEdge[Identifier]](Set(root))
+
+    private def hasNonStructEq(ty: Type): Boolean = {
+      ty match {
+        case FPType(_, _) => true
+        case ADTType(id, _) =>
+          var res = false
+          graph.breadthFirstSearch(id)(n => if (n == root) {res = true})
+          res
+        case ClassType(id, _) =>
+          var res = false
+          graph.breadthFirstSearch(id)(n => if (n == root) {res = true})
+          res
+        case _ => false
+      }
+    }
+
+    override def traverse(e: Expr): Unit = e match {
+      case const @ ClassConstructor(ct, _) if !const.ct.lookupClass(using syms).exists(tcd => tcd.cd.flags.contains(Annotation("noEq", List()))) =>
+        ct.tps.filter(hasNonStructEq).foreach( ty =>
+          errors += MalformedStainlessCode(e,
+            s"Instantiating type variables with types with non-structural equality is unsound ")
+        )
+        super.traverse(e)
+      case inv @ FunctionInvocation(_, tps, _) if !inv.tfd(using syms).flags.contains(Annotation("noEq", List())) =>
+        tps.filter(hasNonStructEq).foreach( ty =>
+          errors += MalformedStainlessCode(e,
+            s"Instantiating type variables with types with non-structural equality is unsound ")
+        )
+        super.traverse(e)
+      case _ => super.traverse(e)
     }
   }
 }

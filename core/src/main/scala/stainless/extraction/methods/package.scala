@@ -48,6 +48,7 @@ package object methods {
     utils.NamedPipeline("MergeInvariants", MergeInvariants(trees)) `andThen`
     utils.NamedPipeline("FieldAccessors",  FieldAccessors(trees))  `andThen`
     utils.NamedPipeline("ValueClasses",    ValueClasses(trees))    `andThen`
+    utils.NamedPipeline("EqualityWeakening", EqualityWeakening(trees)) `andThen`
     utils.NamedPipeline("MethodsLowering", lowering)
   }
 
